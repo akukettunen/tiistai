@@ -26,6 +26,7 @@ import {
 } from "lucide-react";
 import { FormEvent, Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { createPortal } from "react-dom";
 import {
   DndContext,
   KeyboardSensor,
@@ -1907,6 +1908,17 @@ type CellProps = {
 function ValueCell({ item, column, onUpdate }: CellProps) {
   const value = item.column_values[column.id];
 
+  if (column.type === "long_text") {
+    return (
+      <LongTextCell
+        item={item}
+        column={column}
+        value={typeof value === "string" ? value : ""}
+        onUpdate={onUpdate}
+      />
+    );
+  }
+
   if (column.type === "label") {
     const options = column.settings.options ?? [];
     const selected = options.find((option) => option.id === value);
@@ -1965,10 +1977,111 @@ function ValueCell({ item, column, onUpdate }: CellProps) {
   return (
     <input
       className="h-full min-h-10 w-full min-w-40 bg-transparent px-3 text-sm outline-none placeholder:text-[#b2b0bb]"
-      placeholder={column.type === "long_text" ? "Add notes…" : "Add text…"}
+      placeholder="Add text…"
       defaultValue={typeof value === "string" ? value : ""}
       onBlur={(event) => onUpdate(item, column.id, event.target.value)}
     />
+  );
+}
+
+function LongTextCell({
+  item,
+  column,
+  value,
+  onUpdate,
+}: {
+  item: Item;
+  column: BoardColumn;
+  value: string;
+  onUpdate: CellProps["onUpdate"];
+}) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState(value);
+  const anchorRef = useRef<HTMLDivElement>(null);
+  const editorRef = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState({ top: 0, left: 0, width: 448 });
+
+  function save() {
+    if (draft !== value) onUpdate(item, column.id, draft);
+    setOpen(false);
+  }
+
+  useEffect(() => {
+    if (!open) return;
+    function closeOnOutsidePress(event: PointerEvent) {
+      const target = event.target as Node;
+      if (
+        !anchorRef.current?.contains(target) &&
+        !editorRef.current?.contains(target)
+      ) {
+        save();
+      }
+    }
+    document.addEventListener("pointerdown", closeOnOutsidePress);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePress);
+  });
+
+  return (
+    <div ref={anchorRef} className="relative h-full min-h-10 min-w-48">
+      <button
+        className="block h-10 w-full truncate px-3 text-left text-sm text-[#656273] hover:bg-[#f5f4fa]"
+        title={value}
+        onClick={() => {
+          const rect = anchorRef.current?.getBoundingClientRect();
+          if (rect) {
+            const width = Math.min(448, window.innerWidth - 32);
+            const below = rect.bottom + 4;
+            const top =
+              below + 380 > window.innerHeight
+                ? Math.max(16, rect.top - 380)
+                : below;
+            setPosition({
+              top,
+              left: Math.max(16, Math.min(rect.left, window.innerWidth - width - 16)),
+              width,
+            });
+          }
+          setDraft(value);
+          setOpen(true);
+        }}
+      >
+        {value || <span className="text-[#b2b0bb]">Add notes…</span>}
+      </button>
+      {open &&
+        createPortal(
+        <div
+          ref={editorRef}
+          className="fixed z-80 rounded-xl border border-[#dedde6] bg-white p-3 shadow-xl"
+          style={position}
+        >
+          <textarea
+            autoFocus
+            className="min-h-64 w-full resize-y rounded-lg border border-[#dedde6] p-3 text-sm leading-6 outline-none focus:border-[#6c63ff]"
+            placeholder="Add notes…"
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+          />
+          <div className="mt-2 flex justify-end gap-2">
+            <button
+              className="rounded-lg px-3 py-2 text-sm text-[#656273] hover:bg-[#f2f2f6]"
+              onClick={() => {
+                setDraft(value);
+                setOpen(false);
+              }}
+            >
+              Cancel
+            </button>
+            <button
+              className="rounded-lg bg-[#6c63ff] px-4 py-2 text-sm font-semibold text-white"
+              onClick={save}
+            >
+              Save
+            </button>
+          </div>
+        </div>,
+          document.body,
+        )}
+    </div>
   );
 }
 
@@ -2830,7 +2943,7 @@ function ItemPanel({
               <div className="min-h-11 overflow-hidden rounded-xl border border-[#e1e0e8]">
                 {column.type === "long_text" ? (
                   <textarea
-                    className="min-h-32 w-full resize-y p-3 text-sm leading-6 outline-none"
+                    className="min-h-64 w-full resize-y p-3 text-sm leading-6 outline-none"
                     placeholder="Add detailed notes, acceptance criteria, links…"
                     defaultValue={
                       typeof item.column_values[column.id] === "string"
