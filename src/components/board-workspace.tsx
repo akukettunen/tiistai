@@ -8,6 +8,8 @@ import {
   ChevronRight,
   CirclePlus,
   Columns3,
+  Folder,
+  FolderPlus,
   GripVertical,
   LayoutGrid,
   Layers3,
@@ -54,6 +56,14 @@ type Board = {
   description: string;
   color: string;
   archived_at: string | null;
+  folder_id: string | null;
+};
+
+type BoardFolder = {
+  id: string;
+  owner_id: string;
+  name: string;
+  position: number;
 };
 
 type Group = {
@@ -102,6 +112,7 @@ type Automation = {
 type Props = {
   user: { id: string; email: string };
   initialBoards: Board[];
+  initialFolders: BoardFolder[];
   initialGroups: Group[];
   initialColumns: BoardColumn[];
   initialItems: Item[];
@@ -176,6 +187,7 @@ function makeId() {
 export function BoardWorkspace({
   user,
   initialBoards,
+  initialFolders,
   initialGroups,
   initialColumns,
   initialItems,
@@ -185,6 +197,7 @@ export function BoardWorkspace({
   const router = useRouter();
   const supabase = useMemo(() => createClient(), []);
   const [boards, setBoards] = useState(initialBoards);
+  const [folders, setFolders] = useState(initialFolders);
   const [groups, setGroups] = useState(initialGroups);
   const [columns, setColumns] = useState(initialColumns);
   const [items, setItems] = useState(initialItems);
@@ -200,6 +213,7 @@ export function BoardWorkspace({
   const [automationsOpen, setAutomationsOpen] = useState(false);
   const [boardMenuOpen, setBoardMenuOpen] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
+  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set());
   const [editingColumn, setEditingColumn] = useState<BoardColumn | null>(null);
   const [activeItem, setActiveItem] = useState<Item | null>(null);
   const [toast, setToast] = useState<string | null>(initialError);
@@ -334,6 +348,67 @@ export function BoardWorkspace({
     setActiveBoardId(board.id);
     setShowArchived(false);
     setSidebarOpen(false);
+  }
+
+  async function createFolder() {
+    const name = window.prompt("Group name", "New group")?.trim();
+    if (!name) return;
+    const { data, error } = await supabase
+      .from("board_folders")
+      .insert({ owner_id: user.id, name, position: folders.length })
+      .select()
+      .single();
+    if (error) return notify(error.message);
+    setFolders((current) => [...current, data as BoardFolder]);
+  }
+
+  async function renameFolder(folder: BoardFolder) {
+    const name = window.prompt("Group name", folder.name)?.trim();
+    if (!name || name === folder.name) return;
+    const { error } = await supabase
+      .from("board_folders")
+      .update({ name, updated_at: new Date().toISOString() })
+      .eq("id", folder.id);
+    if (error) return notify(error.message);
+    setFolders((current) =>
+      current.map((entry) => (entry.id === folder.id ? { ...entry, name } : entry)),
+    );
+  }
+
+  async function deleteFolder(folder: BoardFolder) {
+    if (!window.confirm(`Remove the “${folder.name}” group? Boards will become ungrouped.`)) {
+      return;
+    }
+    const { error: boardError } = await supabase
+      .from("boards")
+      .update({ folder_id: null, updated_at: new Date().toISOString() })
+      .eq("folder_id", folder.id);
+    if (boardError) return notify(boardError.message);
+    const { error } = await supabase
+      .from("board_folders")
+      .delete()
+      .eq("id", folder.id);
+    if (error) return notify(error.message);
+    setBoards((current) =>
+      current.map((board) =>
+        board.folder_id === folder.id ? { ...board, folder_id: null } : board,
+      ),
+    );
+    setFolders((current) => current.filter((entry) => entry.id !== folder.id));
+  }
+
+  async function moveBoardToFolder(board: Board, folderId: string | null) {
+    const { error } = await supabase
+      .from("boards")
+      .update({ folder_id: folderId, updated_at: new Date().toISOString() })
+      .eq("id", board.id);
+    if (error) return notify(error.message);
+    setBoards((current) =>
+      current.map((entry) =>
+        entry.id === board.id ? { ...entry, folder_id: folderId } : entry,
+      ),
+    );
+    setBoardMenuOpen(false);
   }
 
   async function addGroup() {
@@ -748,6 +823,30 @@ export function BoardWorkspace({
     router.refresh();
   }
 
+  function boardLink(board: Board) {
+    return (
+      <button
+        key={board.id}
+        onClick={() => {
+          setActiveBoardId(board.id);
+          setSidebarOpen(false);
+          setBoardMenuOpen(false);
+        }}
+        className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-sm transition ${
+          board.id === activeBoardId
+            ? "bg-[#6c63ff] font-medium text-white"
+            : "text-white/65 hover:bg-white/[0.07] hover:text-white"
+        }`}
+      >
+        <span
+          className="size-2.5 rounded-sm"
+          style={{ backgroundColor: board.color }}
+        />
+        <span className="truncate">{board.name}</span>
+      </button>
+    );
+  }
+
   return (
     <div className="flex min-h-screen bg-[#f7f7fa] text-[#29283a]">
       {sidebarOpen && (
@@ -791,6 +890,13 @@ export function BoardWorkspace({
               Boards
             </p>
             <div className="flex items-center gap-1">
+              <button
+                aria-label="Create board group"
+                className="rounded p-1 text-white/45 hover:bg-white/10 hover:text-white"
+                onClick={createFolder}
+              >
+                <FolderPlus size={14} />
+              </button>
               {archivedBoards.length > 0 && (
                 <button
                   aria-label="Show archived boards"
@@ -813,26 +919,64 @@ export function BoardWorkspace({
             </div>
           </div>
           <div className="space-y-1 overflow-y-auto">
-            {activeBoards.map((board) => (
-              <button
-                key={board.id}
-                onClick={() => {
-                  setActiveBoardId(board.id);
-                  setSidebarOpen(false);
-                }}
-                className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition ${
-                  board.id === activeBoardId
-                    ? "bg-[#6c63ff] font-medium text-white"
-                    : "text-white/65 hover:bg-white/[0.07] hover:text-white"
-                }`}
-              >
-                <span
-                  className="size-2.5 rounded-sm"
-                  style={{ backgroundColor: board.color }}
-                />
-                <span className="truncate">{board.name}</span>
-              </button>
-            ))}
+            {folders.map((folder) => {
+              const folderBoards = activeBoards.filter(
+                (board) => board.folder_id === folder.id,
+              );
+              const collapsed = collapsedFolders.has(folder.id);
+              return (
+                <div key={folder.id} className="mb-2">
+                  <div className="group flex items-center">
+                    <button
+                      className="flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs font-medium text-white/55 hover:bg-white/5 hover:text-white"
+                      onClick={() =>
+                        setCollapsedFolders((current) => {
+                          const next = new Set(current);
+                          if (next.has(folder.id)) next.delete(folder.id);
+                          else next.add(folder.id);
+                          return next;
+                        })
+                      }
+                    >
+                      <ChevronDown
+                        size={13}
+                        className={`shrink-0 transition ${collapsed ? "-rotate-90" : ""}`}
+                      />
+                      <Folder size={14} className="shrink-0" />
+                      <span className="truncate">{folder.name}</span>
+                    </button>
+                    <button
+                      className="hidden rounded p-1 text-white/35 hover:bg-white/10 hover:text-white group-hover:block"
+                      aria-label={`Rename ${folder.name}`}
+                      onClick={() => renameFolder(folder)}
+                    >
+                      <Pencil size={12} />
+                    </button>
+                    <button
+                      className="hidden rounded p-1 text-white/35 hover:bg-white/10 hover:text-red-300 group-hover:block"
+                      aria-label={`Remove ${folder.name}`}
+                      onClick={() => deleteFolder(folder)}
+                    >
+                      <X size={13} />
+                    </button>
+                  </div>
+                  {!collapsed && (
+                    <div className="ml-3 border-l border-white/10 pl-2">
+                      {folderBoards.map(boardLink)}
+                      {folderBoards.length === 0 && (
+                        <p className="px-3 py-1.5 text-[11px] text-white/25">Empty</p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            {folders.length > 0 && activeBoards.some((board) => !board.folder_id) && (
+              <p className="mt-3 px-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-white/30">
+                Ungrouped
+              </p>
+            )}
+            {activeBoards.filter((board) => !board.folder_id).map(boardLink)}
             {showArchived && archivedBoards.length > 0 && (
               <div className="mt-4 border-t border-white/10 pt-3">
                 <p className="mb-2 px-3 text-[10px] font-semibold uppercase tracking-wider text-white/30">
@@ -919,7 +1063,27 @@ export function BoardWorkspace({
                     <MoreHorizontal size={20} />
                   </button>
                   {boardMenuOpen && (
-                    <div className="absolute right-0 top-full z-20 mt-1 w-40 rounded-xl border border-[#e2e1e8] bg-white p-1.5 text-sm shadow-lg">
+                    <div className="absolute right-0 top-full z-20 mt-1 w-52 rounded-xl border border-[#e2e1e8] bg-white p-1.5 text-sm shadow-lg">
+                      <label className="block px-3 pb-2 pt-1 text-[11px] font-medium text-[#858392]">
+                        Sidebar group
+                        <select
+                          className="mt-1.5 h-9 w-full rounded-lg border border-[#dedde6] bg-white px-2 text-sm text-[#343243] outline-none"
+                          value={activeBoard.folder_id ?? ""}
+                          onChange={(event) =>
+                            moveBoardToFolder(
+                              activeBoard,
+                              event.target.value || null,
+                            )
+                          }
+                        >
+                          <option value="">Ungrouped</option>
+                          {folders.map((folder) => (
+                            <option key={folder.id} value={folder.id}>
+                              {folder.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
                       <button
                         className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left hover:bg-[#f3f2f7]"
                         onClick={() => renameBoard(activeBoard)}

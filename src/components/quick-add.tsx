@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { ArrowLeft, Check, Layers3, Plus } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 
@@ -56,8 +56,13 @@ export function QuickAdd({
   initialError,
 }: Props) {
   const supabase = useMemo(() => createClient(), []);
-  const [boardId, setBoardId] = useState("");
-  const [groupId, setGroupId] = useState("");
+  const defaultBoardId = boards[0]?.id ?? "";
+  const defaultGroupId =
+    groups
+      .filter((group) => group.board_id === defaultBoardId)
+      .sort((a, b) => a.position - b.position)[0]?.id ?? "";
+  const [boardId, setBoardId] = useState(defaultBoardId);
+  const [groupId, setGroupId] = useState(defaultGroupId);
   const [title, setTitle] = useState("");
   const [values, setValues] = useState<Record<string, string | boolean | null>>({});
   const [saving, setSaving] = useState(false);
@@ -68,15 +73,45 @@ export function QuickAdd({
   const boardGroups = groups.filter((group) => group.board_id === boardId);
   const boardColumns = columns.filter((column) => column.board_id === boardId);
 
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const storedBoardId = window.localStorage.getItem("tuesday.quickAdd.boardId");
+      const nextBoardId = boards.some((board) => board.id === storedBoardId)
+        ? storedBoardId!
+        : defaultBoardId;
+      const availableGroups = groups
+        .filter((group) => group.board_id === nextBoardId)
+        .sort((a, b) => a.position - b.position);
+      const storedGroupId = window.localStorage.getItem("tuesday.quickAdd.groupId");
+      const nextGroupId = availableGroups.some((group) => group.id === storedGroupId)
+        ? storedGroupId!
+        : (availableGroups[0]?.id ?? "");
+      setBoardId(nextBoardId);
+      setGroupId(nextGroupId);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [boards, defaultBoardId, groups]);
+
   function selectBoard(nextBoardId: string) {
     const firstGroup = groups
       .filter((group) => group.board_id === nextBoardId)
       .sort((a, b) => a.position - b.position)[0];
     setBoardId(nextBoardId);
     setGroupId(firstGroup?.id ?? "");
+    window.localStorage.setItem("tuesday.quickAdd.boardId", nextBoardId);
+    if (firstGroup) {
+      window.localStorage.setItem("tuesday.quickAdd.groupId", firstGroup.id);
+    } else {
+      window.localStorage.removeItem("tuesday.quickAdd.groupId");
+    }
     setValues({});
     setSavedTitle(null);
     setError(null);
+  }
+
+  function selectGroup(nextGroupId: string) {
+    setGroupId(nextGroupId);
+    window.localStorage.setItem("tuesday.quickAdd.groupId", nextGroupId);
   }
 
   function setColumnValue(columnId: string, value: string | boolean | null) {
@@ -137,19 +172,19 @@ export function QuickAdd({
           <span className="mx-auto grid size-12 place-items-center rounded-full bg-emerald-50 text-emerald-600">
             <Check size={23} />
           </span>
-          <h1 className="mt-5 text-xl font-semibold">Item added</h1>
+          <h1 className="mt-5 text-xl font-semibold">Kohde lisätty</h1>
           <p className="mt-1 truncate text-sm text-[#777584]">{savedTitle}</p>
           <button
             className="mt-6 h-11 w-full rounded-lg bg-[#6c63ff] text-sm font-semibold text-white"
             onClick={() => setSavedTitle(null)}
           >
-            Add another
+            Lisää toinen
           </button>
           <Link
             href="/board"
             className="mt-2 block rounded-lg py-3 text-sm font-medium text-[#656273]"
           >
-            Open board
+            Avaa taulu
           </Link>
         </div>
       </main>
@@ -162,24 +197,24 @@ export function QuickAdd({
         <div className="mx-auto flex h-14 max-w-2xl items-center px-4">
           <Link
             href="/board"
-            aria-label="Back to boards"
+            aria-label="Takaisin tauluihin"
             className="rounded-lg p-2 text-[#6e6c7d] hover:bg-[#f2f2f6]"
           >
             <ArrowLeft size={20} />
           </Link>
           <div className="ml-2 flex items-center gap-2 text-sm font-semibold">
             <Layers3 size={17} className="text-[#6c63ff]" />
-            Quick add
+            Pikalisäys
           </div>
         </div>
       </header>
 
       <div className="mx-auto max-w-2xl px-4 py-6 sm:py-10">
         <section>
-          <h1 className="text-sm font-semibold text-[#302e40]">Board</h1>
+          <h1 className="text-sm font-semibold text-[#302e40]">Taulu</h1>
           {boards.length === 0 ? (
             <div className="mt-3 rounded-xl border border-dashed border-[#d8d7df] bg-white p-6 text-center text-sm text-[#7d7b89]">
-              Create a board in the main app first.
+              Luo ensin taulu päänäkymässä.
             </div>
           ) : (
             <div className="mt-3 flex flex-wrap gap-2">
@@ -208,21 +243,20 @@ export function QuickAdd({
           <form className="mt-8 space-y-6" onSubmit={submit}>
             <label className="block">
               <span className="mb-2 block text-sm font-semibold text-[#302e40]">
-                Item title
+                Kohteen nimi
               </span>
               <input
                 autoFocus
                 className="h-12 w-full rounded-xl border border-[#dedde5] bg-white px-4 text-base outline-none focus:border-[#6c63ff]"
-                placeholder="What needs to be done?"
+                placeholder="Mitä pitää tehdä?"
                 value={title}
                 onChange={(event) => setTitle(event.target.value)}
                 required
               />
             </label>
-
-            {boardGroups.length > 1 && (
+            {boardGroups.length > 0 && (
               <div>
-                <p className="mb-2 text-sm font-semibold text-[#302e40]">Group</p>
+                <p className="mb-2 text-sm font-semibold text-[#302e40]">Ryhmä</p>
                 <div className="flex flex-wrap gap-2">
                   {boardGroups.map((group) => (
                     <button
@@ -233,7 +267,7 @@ export function QuickAdd({
                           ? "border-[#6c63ff] bg-[#efedff] text-[#5148df]"
                           : "border-[#dedde5] bg-white"
                       }`}
-                      onClick={() => setGroupId(group.id)}
+                      onClick={() => selectGroup(group.id)}
                     >
                       <span
                         className="size-2 rounded-full"
@@ -245,6 +279,13 @@ export function QuickAdd({
                 </div>
               </div>
             )}
+            <button
+              className="flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#6c63ff] text-sm font-semibold text-white disabled:opacity-50"
+              disabled={saving || !title.trim() || !groupId}
+            >
+              <Plus size={17} />
+              {saving ? "Lisätään…" : "Tallenna"}
+            </button>
 
             {boardColumns.map((column) => (
               <QuickColumnField
@@ -266,7 +307,7 @@ export function QuickAdd({
               disabled={saving || !title.trim() || !groupId}
             >
               <Plus size={18} />
-              {saving ? "Adding…" : "Add item"}
+              {saving ? "Lisätään…" : "Lisää kohde"}
             </button>
           </form>
         )}

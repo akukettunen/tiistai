@@ -8,8 +8,9 @@ export default async function BoardPage() {
 
   if (!authData.user) redirect("/auth");
 
-  const [boards, groups, columns, items, automations] = await Promise.all([
+  const [boards, folders, groups, columns, items, automations] = await Promise.all([
     supabase.from("boards").select("*").order("created_at"),
+    supabase.from("board_folders").select("*").order("position"),
     supabase.from("board_groups").select("*").order("position"),
     supabase.from("board_columns").select("*").order("position"),
     supabase.from("items").select("*").order("position"),
@@ -18,6 +19,7 @@ export default async function BoardPage() {
 
   const loadError =
     boards.error ??
+    folders.error ??
     groups.error ??
     columns.error ??
     items.error ??
@@ -28,6 +30,7 @@ export default async function BoardPage() {
     <BoardWorkspace
       user={{ id: authData.user.id, email: authData.user.email ?? "" }}
       initialBoards={boards.data ?? []}
+      initialFolders={folders.data ?? []}
       initialGroups={groups.data ?? []}
       initialColumns={columns.data ?? []}
       initialItems={items.data ?? []}
