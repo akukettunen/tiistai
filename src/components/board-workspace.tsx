@@ -247,10 +247,13 @@ export function BoardWorkspace({
     const name = window.prompt("Board name", "Product roadmap")?.trim();
     if (!name) return;
     setCreatingBoard(true);
+    const previousColor = boards.at(-1)?.color;
+    const previousColorIndex = previousColor ? COLORS.indexOf(previousColor) : -1;
+    const color = COLORS[(previousColorIndex + 1) % COLORS.length];
 
     const { data: board, error } = await supabase
       .from("boards")
-      .insert({ name, owner_id: user.id })
+      .insert({ name, owner_id: user.id, color })
       .select()
       .single();
 
@@ -312,6 +315,20 @@ export function BoardWorkspace({
       current.map((entry) => (entry.id === board.id ? { ...entry, name } : entry)),
     );
     setBoardMenuOpen(false);
+  }
+
+  async function changeBoardColor(board: Board, color: string) {
+    if (color === board.color) return;
+    const { error } = await supabase
+      .from("boards")
+      .update({ color, updated_at: new Date().toISOString() })
+      .eq("id", board.id);
+    if (error) return notify(error.message);
+    setBoards((current) =>
+      current.map((entry) =>
+        entry.id === board.id ? { ...entry, color } : entry,
+      ),
+    );
   }
 
   async function archiveBoard(board: Board) {
@@ -1063,7 +1080,7 @@ export function BoardWorkspace({
                     <MoreHorizontal size={20} />
                   </button>
                   {boardMenuOpen && (
-                    <div className="absolute right-0 top-full z-20 mt-1 w-52 rounded-xl border border-[#e2e1e8] bg-white p-1.5 text-sm shadow-lg">
+                    <div className="absolute right-0 top-full z-60 mt-1 w-52 rounded-xl border border-[#e2e1e8] bg-white p-1.5 text-sm shadow-lg">
                       <label className="block px-3 pb-2 pt-1 text-[11px] font-medium text-[#858392]">
                         Sidebar group
                         <select
@@ -1084,6 +1101,26 @@ export function BoardWorkspace({
                           ))}
                         </select>
                       </label>
+                      <div className="border-t border-[#ecebf1] px-3 py-2">
+                        <p className="mb-2 text-[11px] font-medium text-[#858392]">
+                          Board color
+                        </p>
+                        <div className="flex flex-wrap gap-2">
+                          {COLORS.map((color) => (
+                            <button
+                              key={color}
+                              className={`size-6 rounded-full border-2 border-white ring-offset-1 ${
+                                activeBoard.color === color
+                                  ? "ring-2 ring-[#6c63ff]"
+                                  : "ring-1 ring-[#dedde6]"
+                              }`}
+                              style={{ backgroundColor: color }}
+                              aria-label={`Set board color to ${color}`}
+                              onClick={() => changeBoardColor(activeBoard, color)}
+                            />
+                          ))}
+                        </div>
+                      </div>
                       <button
                         className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left hover:bg-[#f3f2f7]"
                         onClick={() => renameBoard(activeBoard)}
@@ -1583,7 +1620,7 @@ function MobileCards({
           />
         ))}
         <form
-          className="flex h-12 items-center gap-2 rounded-xl border border-dashed border-[#d7d5e0] bg-white/70 px-4"
+          className="flex h-12 items-center gap-2 rounded-xl border border-dashed border-[#d7d5e0] bg-white/70 pl-4 pr-1.5"
           onSubmit={onAddItem}
         >
           <Plus size={16} className="text-[#aaa8b4]" />
@@ -1593,6 +1630,13 @@ function MobileCards({
             value={newTitle}
             onChange={(event) => onNewTitle(event.target.value)}
           />
+          <button
+            type="submit"
+            className="h-9 rounded-lg bg-[#6c63ff] px-3 text-xs font-semibold text-white disabled:opacity-40"
+            disabled={!newTitle.trim()}
+          >
+            Add
+          </button>
         </form>
       </div>
     </SortableContext>
