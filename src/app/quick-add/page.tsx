@@ -13,6 +13,7 @@ export default async function QuickAddPage() {
       .from("boards")
       .select("*")
       .is("archived_at", null)
+      .order("position")
       .order("created_at"),
     supabase.from("board_groups").select("*").order("position"),
     supabase.from("board_columns").select("*").order("position"),

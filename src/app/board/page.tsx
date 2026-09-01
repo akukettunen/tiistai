@@ -9,7 +9,7 @@ export default async function BoardPage() {
   if (!authData.user) redirect("/auth");
 
   const [boards, folders, groups, columns, items, automations] = await Promise.all([
-    supabase.from("boards").select("*").order("created_at"),
+    supabase.from("boards").select("*").order("position").order("created_at"),
     supabase.from("board_folders").select("*").order("position"),
     supabase.from("board_groups").select("*").order("position"),
     supabase.from("board_columns").select("*").order("position"),

@@ -24,12 +24,13 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   DndContext,
   KeyboardSensor,
-  PointerSensor,
+  MouseSensor,
+  TouchSensor,
   closestCenter,
   pointerWithin,
   type CollisionDetection,
@@ -57,6 +58,7 @@ type Board = {
   color: string;
   archived_at: string | null;
   folder_id: string | null;
+  position: number;
 };
 
 type BoardFolder = {
@@ -65,6 +67,20 @@ type BoardFolder = {
   name: string;
   position: number;
 };
+
+type SidebarEntry =
+  | {
+      id: string;
+      position: number;
+      type: "folder";
+      folder: BoardFolder;
+    }
+  | {
+      id: string;
+      position: number;
+      type: "board";
+      board: Board;
+    };
 
 type Group = {
   id: string;
@@ -133,7 +149,73 @@ const COLORS = [
 
 const collisionDetectionStrategy: CollisionDetection = (args) => {
   const pointerCollisions = pointerWithin(args);
-  return pointerCollisions.length > 0 ? pointerCollisions : closestCenter(args);
+  if (pointerCollisions.length > 0) {
+    const activeId = String(args.active.id);
+    if (
+      activeId.startsWith("sidebar-board:") ||
+      activeId.startsWith("sidebar-folder:")
+    ) {
+      const gapCollision = pointerCollisions.find((collision) =>
+        String(collision.id).startsWith("sidebar-gap:"),
+      );
+      if (gapCollision) return [gapCollision];
+    }
+    if (activeId.startsWith("sidebar-board:")) {
+      const boardCollision = pointerCollisions.find(
+        (collision) =>
+          String(collision.id).startsWith("sidebar-board:") &&
+          collision.id !== args.active.id,
+      );
+      if (boardCollision) return [boardCollision];
+      const folderCollision = pointerCollisions.find((collision) =>
+        String(collision.id).startsWith("folder-items:"),
+      );
+      if (folderCollision) return [folderCollision];
+      const folderRowCollision = pointerCollisions.find((collision) =>
+        String(collision.id).startsWith("sidebar-folder:"),
+      );
+      if (folderRowCollision) return [folderRowCollision];
+    }
+    if (activeId.startsWith("sidebar-folder:")) {
+      const topLevelCollision = pointerCollisions.find(
+        (collision) =>
+          String(collision.id).startsWith("sidebar-folder:") ||
+          String(collision.id).startsWith("sidebar-board:"),
+      );
+      if (topLevelCollision) return [topLevelCollision];
+    }
+    if (activeId.startsWith("board-group:")) {
+      const groupCollision = pointerCollisions.find(
+        (collision) =>
+          String(collision.id).startsWith("board-group:") &&
+          collision.id !== args.active.id,
+      );
+      if (groupCollision) return [groupCollision];
+    }
+    if (/^[dm]:/.test(activeId)) {
+      const itemCollision = pointerCollisions.find(
+        (collision) =>
+          /^[dm]:/.test(String(collision.id)) &&
+          collision.id !== args.active.id,
+      );
+      if (itemCollision) return [itemCollision];
+      const groupCollision = pointerCollisions.find((collision) =>
+        /^[dm]group:/.test(String(collision.id)),
+      );
+      if (groupCollision) return [groupCollision];
+    }
+    return pointerCollisions;
+  }
+  const activeId = String(args.active.id);
+  if (activeId.startsWith("board-group:")) {
+    const groupContainers = args.droppableContainers.filter((container) =>
+      String(container.id).startsWith("board-group:"),
+    );
+    if (groupContainers.length > 0) {
+      return closestCenter({ ...args, droppableContainers: groupContainers });
+    }
+  }
+  return closestCenter(args);
 };
 
 const DEFAULT_COLUMNS: Array<Omit<BoardColumn, "id" | "board_id" | "owner_id">> = [
@@ -215,18 +297,40 @@ export function BoardWorkspace({
   const [showArchived, setShowArchived] = useState(false);
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set());
   const [editingColumn, setEditingColumn] = useState<BoardColumn | null>(null);
+  const [editingGroup, setEditingGroup] = useState<Group | null>(null);
+  const boardMenuRef = useRef<HTMLDivElement>(null);
   const [activeItem, setActiveItem] = useState<Item | null>(null);
   const [toast, setToast] = useState<string | null>(initialError);
   const [creatingBoard, setCreatingBoard] = useState(false);
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(MouseSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(TouchSensor, {
+      activationConstraint: { delay: 100, tolerance: 5 },
+    }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
   const activeBoard = boards.find((board) => board.id === activeBoardId);
   const activeBoards = boards.filter((board) => !board.archived_at);
   const archivedBoards = boards.filter((board) => board.archived_at);
-  const activeGroups = groups.filter((group) => group.board_id === activeBoardId);
+  const rootBoards = activeBoards.filter((board) => !board.folder_id);
+  const sidebarEntries = [
+    ...folders.map((folder) => ({
+      id: `sidebar-folder:${folder.id}`,
+      position: folder.position,
+      type: "folder" as const,
+      folder,
+    })),
+    ...rootBoards.map((board) => ({
+      id: `sidebar-board:${board.id}`,
+      position: board.position,
+      type: "board" as const,
+      board,
+    })),
+  ].sort((a, b) => a.position - b.position);
+  const activeGroups = groups
+    .filter((group) => group.board_id === activeBoardId)
+    .sort((a, b) => a.position - b.position);
   const activeColumns = columns.filter((column) => column.board_id === activeBoardId);
   const filteredItems = items.filter(
     (item) =>
@@ -237,6 +341,17 @@ export function BoardWorkspace({
           String(value ?? "").toLowerCase().includes(query.toLowerCase()),
         )),
   );
+
+  useEffect(() => {
+    if (!boardMenuOpen) return;
+    function closeOnOutsidePress(event: PointerEvent) {
+      if (!boardMenuRef.current?.contains(event.target as Node)) {
+        setBoardMenuOpen(false);
+      }
+    }
+    document.addEventListener("pointerdown", closeOnOutsidePress);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePress);
+  }, [boardMenuOpen]);
 
   function notify(message: string) {
     setToast(message);
@@ -253,7 +368,12 @@ export function BoardWorkspace({
 
     const { data: board, error } = await supabase
       .from("boards")
-      .insert({ name, owner_id: user.id, color })
+      .insert({
+        name,
+        owner_id: user.id,
+        color,
+        position: folders.length + activeBoards.filter((board) => !board.folder_id).length,
+      })
       .select()
       .single();
 
@@ -372,7 +492,11 @@ export function BoardWorkspace({
     if (!name) return;
     const { data, error } = await supabase
       .from("board_folders")
-      .insert({ owner_id: user.id, name, position: folders.length })
+      .insert({
+        owner_id: user.id,
+        name,
+        position: folders.length + activeBoards.filter((board) => !board.folder_id).length,
+      })
       .select()
       .single();
     if (error) return notify(error.message);
@@ -428,6 +552,253 @@ export function BoardWorkspace({
     setBoardMenuOpen(false);
   }
 
+  async function persistSidebarOrder(
+    nextBoards: Board[],
+    nextFolders: BoardFolder[],
+  ) {
+    setBoards(nextBoards);
+    setFolders(nextFolders);
+    const results = await Promise.all([
+      ...nextBoards.map((board) =>
+        supabase
+          .from("boards")
+          .update({ folder_id: board.folder_id, position: board.position })
+          .eq("id", board.id),
+      ),
+      ...nextFolders.map((folder) =>
+        supabase
+          .from("board_folders")
+          .update({ position: folder.position })
+          .eq("id", folder.id),
+      ),
+    ]);
+    const error = results.find((result) => result.error)?.error;
+    if (error) notify(error.message);
+  }
+
+  async function handleSidebarDragEnd({ active, over }: DragEndEvent) {
+    if (!over || active.id === over.id) return;
+    const activeId = String(active.id);
+    const overId = String(over.id);
+    const translatedRect = active.rect.current.translated;
+    const dropAfter =
+      translatedRect !== null &&
+      translatedRect.top + translatedRect.height / 2 >
+        over.rect.top + over.rect.height / 2;
+
+    if (activeId.startsWith("sidebar-folder:")) {
+      if (
+        overId !== "sidebar-root" &&
+        !overId.startsWith("sidebar-gap:") &&
+        !overId.startsWith("sidebar-folder:") &&
+        !overId.startsWith("sidebar-board:")
+      ) {
+        return;
+      }
+      const reordered = sidebarEntries.filter((entry) => entry.id !== activeId);
+      const movingEntry = sidebarEntries.find((entry) => entry.id === activeId);
+      if (!movingEntry) return;
+      const overIndex =
+        overId === "sidebar-root"
+          ? dropAfter
+            ? reordered.length
+            : 0
+          : overId.startsWith("sidebar-gap:")
+            ? Math.max(
+                0,
+                Math.min(
+                  reordered.length,
+                  Number(overId.replace("sidebar-gap:", "")) -
+                    (sidebarEntries.findIndex((entry) => entry.id === activeId) <
+                    Number(overId.replace("sidebar-gap:", ""))
+                      ? 1
+                      : 0),
+                ),
+              )
+          : reordered.findIndex((entry) => entry.id === overId);
+      if (overIndex < 0) return;
+      reordered.splice(
+        overId === "sidebar-root"
+          ? overIndex
+          : overId.startsWith("sidebar-gap:")
+            ? overIndex
+          : overIndex + (dropAfter ? 1 : 0),
+        0,
+        movingEntry,
+      );
+      const positions = new Map(
+        reordered.map((entry, position) => [entry.id, position]),
+      );
+      const nextFolders = folders.map((folder) => ({
+        ...folder,
+        position: positions.get(`sidebar-folder:${folder.id}`) ?? folder.position,
+      }));
+      const nextBoards = boards.map((board) => ({
+        ...board,
+        position:
+          board.folder_id === null
+            ? (positions.get(`sidebar-board:${board.id}`) ?? board.position)
+            : board.position,
+      }));
+      await persistSidebarOrder(nextBoards, nextFolders);
+      return;
+    }
+
+    if (!activeId.startsWith("sidebar-board:")) return;
+    const boardId = activeId.replace("sidebar-board:", "");
+    const movingBoard = boards.find((board) => board.id === boardId);
+    if (!movingBoard) return;
+    const overBoard = overId.startsWith("sidebar-board:")
+      ? boards.find(
+          (board) => board.id === overId.replace("sidebar-board:", ""),
+        )
+      : undefined;
+    const targetFolderId = overId.startsWith("folder-items:")
+      ? overId.replace("folder-items:", "")
+      : overId.startsWith("sidebar-folder:")
+        ? overId.replace("sidebar-folder:", "")
+        : overBoard?.folder_id ?? null;
+
+    let nextBoards = boards.map((board) => ({ ...board }));
+    let nextFolders = folders.map((folder) => ({ ...folder }));
+
+    if (targetFolderId) {
+      const destination = nextBoards
+        .filter(
+          (board) =>
+            board.folder_id === targetFolderId && board.id !== movingBoard.id,
+        )
+        .sort((a, b) => a.position - b.position);
+      const overIndex = overBoard
+        ? destination.findIndex((board) => board.id === overBoard.id)
+        : -1;
+      destination.splice(
+        overIndex < 0 ? destination.length : overIndex + (dropAfter ? 1 : 0),
+        0,
+        {
+          ...movingBoard,
+          folder_id: targetFolderId,
+        },
+      );
+      const destinationPositions = new Map(
+        destination.map((board, position) => [board.id, position]),
+      );
+      nextBoards = nextBoards.map((board) =>
+        destinationPositions.has(board.id)
+          ? {
+              ...board,
+              folder_id: targetFolderId,
+              position: destinationPositions.get(board.id)!,
+            }
+          : board,
+      );
+    } else {
+      const withoutMoving = sidebarEntries.filter(
+        (entry) => entry.id !== activeId,
+      );
+      const targetIndex =
+        overId === "sidebar-root"
+          ? dropAfter
+            ? withoutMoving.length
+            : 0
+          : overId.startsWith("sidebar-gap:")
+            ? Math.max(
+                0,
+                Math.min(
+                  withoutMoving.length,
+                  Number(overId.replace("sidebar-gap:", "")) -
+                    (sidebarEntries.findIndex((entry) => entry.id === activeId) <
+                    Number(overId.replace("sidebar-gap:", ""))
+                      ? 1
+                      : 0),
+                ),
+              )
+            : withoutMoving.findIndex((entry) => entry.id === overId);
+      const movedEntry = {
+        id: activeId,
+        position: 0,
+        type: "board" as const,
+        board: { ...movingBoard, folder_id: null },
+      };
+      withoutMoving.splice(
+        targetIndex < 0
+          ? withoutMoving.length
+          : targetIndex +
+            (overId.startsWith("sidebar-gap:") ? 0 : dropAfter ? 1 : 0),
+        0,
+        movedEntry,
+      );
+      const rootPositions = new Map(
+        withoutMoving.map((entry, position) => [entry.id, position]),
+      );
+      nextFolders = nextFolders.map((folder) => ({
+        ...folder,
+        position:
+          rootPositions.get(`sidebar-folder:${folder.id}`) ?? folder.position,
+      }));
+      nextBoards = nextBoards.map((board) =>
+        board.id === movingBoard.id
+          ? {
+              ...board,
+              folder_id: null,
+              position: rootPositions.get(activeId) ?? board.position,
+            }
+          : board.folder_id === null
+            ? {
+                ...board,
+                position:
+                  rootPositions.get(`sidebar-board:${board.id}`) ??
+                  board.position,
+              }
+            : board,
+      );
+    }
+
+    if (movingBoard.folder_id && movingBoard.folder_id !== targetFolderId) {
+      const source = nextBoards
+        .filter(
+          (board) =>
+            board.folder_id === movingBoard.folder_id &&
+            board.id !== movingBoard.id,
+        )
+        .sort((a, b) => a.position - b.position);
+      const sourcePositions = new Map(
+        source.map((board, position) => [board.id, position]),
+      );
+      nextBoards = nextBoards.map((board) =>
+        sourcePositions.has(board.id)
+          ? { ...board, position: sourcePositions.get(board.id)! }
+          : board,
+      );
+    }
+
+    if (movingBoard.folder_id === null && targetFolderId) {
+      const rootWithoutMoving = sidebarEntries.filter(
+        (entry) => entry.id !== activeId,
+      );
+      const rootPositions = new Map(
+        rootWithoutMoving.map((entry, position) => [entry.id, position]),
+      );
+      nextFolders = nextFolders.map((folder) => ({
+        ...folder,
+        position:
+          rootPositions.get(`sidebar-folder:${folder.id}`) ?? folder.position,
+      }));
+      nextBoards = nextBoards.map((board) =>
+        board.folder_id === null
+          ? {
+              ...board,
+              position:
+                rootPositions.get(`sidebar-board:${board.id}`) ??
+                board.position,
+            }
+          : board,
+      );
+    }
+
+    await persistSidebarOrder(nextBoards, nextFolders);
+  }
+
   async function addGroup() {
     if (!activeBoard) return;
     const name = window.prompt("Group name", "New group")?.trim();
@@ -446,6 +817,26 @@ export function BoardWorkspace({
       .single();
     if (error) return notify(error.message);
     setGroups((current) => [...current, data as Group]);
+  }
+
+  async function saveGroup(group: Group) {
+    const name = group.name.trim();
+    if (!name) return;
+    const { error } = await supabase
+      .from("board_groups")
+      .update({
+        name,
+        color: group.color,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", group.id);
+    if (error) return notify(error.message);
+    setGroups((current) =>
+      current.map((entry) =>
+        entry.id === group.id ? { ...entry, name, color: group.color } : entry,
+      ),
+    );
+    setEditingGroup(null);
   }
 
   async function addItem(event: FormEvent, group: Group) {
@@ -738,6 +1129,46 @@ export function BoardWorkspace({
     if (error) notify(error.message);
   }
 
+  async function handleWorkspaceDragEnd(event: DragEndEvent) {
+    if (String(event.active.id).startsWith("board-group:")) {
+      const { active, over } = event;
+      if (!over || active.id === over.id) return;
+      const activeId = String(active.id).replace("board-group:", "");
+      const overId = String(over.id).replace("board-group:", "");
+      const ordered = [...activeGroups].sort((a, b) => a.position - b.position);
+      const moving = ordered.find((group) => group.id === activeId);
+      const withoutMoving = ordered.filter((group) => group.id !== activeId);
+      const overIndex = withoutMoving.findIndex((group) => group.id === overId);
+      if (!moving || overIndex < 0) return;
+      const translatedRect = active.rect.current.translated;
+      const dropAfter =
+        translatedRect !== null &&
+        translatedRect.top + translatedRect.height / 2 >
+          over.rect.top + over.rect.height / 2;
+      withoutMoving.splice(overIndex + (dropAfter ? 1 : 0), 0, moving);
+      const reordered = withoutMoving.map((group, position) => ({
+        ...group,
+        position,
+      }));
+      const reorderedById = new Map(reordered.map((group) => [group.id, group]));
+      setGroups((current) =>
+        current.map((group) => reorderedById.get(group.id) ?? group),
+      );
+      const results = await Promise.all(
+        reordered.map((group) =>
+          supabase
+            .from("board_groups")
+            .update({ position: group.position })
+            .eq("id", group.id),
+        ),
+      );
+      const error = results.find((result) => result.error)?.error;
+      if (error) notify(error.message);
+      return;
+    }
+    await handleDragEnd(event);
+  }
+
   function handleDragOver({ active, over }: DragOverEvent) {
     if (!over) return;
     const activeId = String(active.id).replace(/^[dm]:/, "");
@@ -840,30 +1271,6 @@ export function BoardWorkspace({
     router.refresh();
   }
 
-  function boardLink(board: Board) {
-    return (
-      <button
-        key={board.id}
-        onClick={() => {
-          setActiveBoardId(board.id);
-          setSidebarOpen(false);
-          setBoardMenuOpen(false);
-        }}
-        className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-sm transition ${
-          board.id === activeBoardId
-            ? "bg-[#6c63ff] font-medium text-white"
-            : "text-white/65 hover:bg-white/[0.07] hover:text-white"
-        }`}
-      >
-        <span
-          className="size-2.5 rounded-sm"
-          style={{ backgroundColor: board.color }}
-        />
-        <span className="truncate">{board.name}</span>
-      </button>
-    );
-  }
-
   return (
     <div className="flex min-h-screen bg-[#f7f7fa] text-[#29283a]">
       {sidebarOpen && (
@@ -892,16 +1299,7 @@ export function BoardWorkspace({
             <X size={18} />
           </button>
         </div>
-        <nav className="px-3 pt-4">
-          <p className="mb-2 px-3 text-[11px] font-semibold uppercase tracking-[0.14em] text-white/35">
-            Workspace
-          </p>
-          <button className="flex w-full items-center gap-3 rounded-xl bg-white/10 px-3 py-2.5 text-left text-sm font-medium">
-            <LayoutGrid size={17} className="text-[#918bff]" />
-            My boards
-          </button>
-        </nav>
-        <div className="mt-6 flex min-h-0 flex-1 flex-col px-3">
+        <div className="mt-4 flex min-h-0 flex-1 flex-col px-3">
           <div className="mb-2 flex items-center justify-between px-3">
             <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-white/35">
               Boards
@@ -936,64 +1334,33 @@ export function BoardWorkspace({
             </div>
           </div>
           <div className="space-y-1 overflow-y-auto">
-            {folders.map((folder) => {
-              const folderBoards = activeBoards.filter(
-                (board) => board.folder_id === folder.id,
-              );
-              const collapsed = collapsedFolders.has(folder.id);
-              return (
-                <div key={folder.id} className="mb-2">
-                  <div className="group flex items-center">
-                    <button
-                      className="flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs font-medium text-white/55 hover:bg-white/5 hover:text-white"
-                      onClick={() =>
-                        setCollapsedFolders((current) => {
-                          const next = new Set(current);
-                          if (next.has(folder.id)) next.delete(folder.id);
-                          else next.add(folder.id);
-                          return next;
-                        })
-                      }
-                    >
-                      <ChevronDown
-                        size={13}
-                        className={`shrink-0 transition ${collapsed ? "-rotate-90" : ""}`}
-                      />
-                      <Folder size={14} className="shrink-0" />
-                      <span className="truncate">{folder.name}</span>
-                    </button>
-                    <button
-                      className="hidden rounded p-1 text-white/35 hover:bg-white/10 hover:text-white group-hover:block"
-                      aria-label={`Rename ${folder.name}`}
-                      onClick={() => renameFolder(folder)}
-                    >
-                      <Pencil size={12} />
-                    </button>
-                    <button
-                      className="hidden rounded p-1 text-white/35 hover:bg-white/10 hover:text-red-300 group-hover:block"
-                      aria-label={`Remove ${folder.name}`}
-                      onClick={() => deleteFolder(folder)}
-                    >
-                      <X size={13} />
-                    </button>
-                  </div>
-                  {!collapsed && (
-                    <div className="ml-3 border-l border-white/10 pl-2">
-                      {folderBoards.map(boardLink)}
-                      {folderBoards.length === 0 && (
-                        <p className="px-3 py-1.5 text-[11px] text-white/25">Empty</p>
-                      )}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-            {folders.length > 0 && activeBoards.some((board) => !board.folder_id) && (
-              <p className="mt-3 px-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-white/30">
-                Ungrouped
-              </p>
-            )}
-            {activeBoards.filter((board) => !board.folder_id).map(boardLink)}
+            <DndContext
+              sensors={sensors}
+              collisionDetection={collisionDetectionStrategy}
+              onDragEnd={handleSidebarDragEnd}
+            >
+              <SidebarRoot
+                entries={sidebarEntries}
+                boards={activeBoards}
+                activeBoardId={activeBoardId}
+                collapsedFolders={collapsedFolders}
+                onSelectBoard={(board) => {
+                  setActiveBoardId(board.id);
+                  setSidebarOpen(false);
+                  setBoardMenuOpen(false);
+                }}
+                onToggleFolder={(folder) =>
+                  setCollapsedFolders((current) => {
+                    const next = new Set(current);
+                    if (next.has(folder.id)) next.delete(folder.id);
+                    else next.add(folder.id);
+                    return next;
+                  })
+                }
+                onRenameFolder={renameFolder}
+                onDeleteFolder={deleteFolder}
+              />
+            </DndContext>
             {showArchived && archivedBoards.length > 0 && (
               <div className="mt-4 border-t border-white/10 pt-3">
                 <p className="mb-2 px-3 text-[10px] font-semibold uppercase tracking-wider text-white/30">
@@ -1068,7 +1435,7 @@ export function BoardWorkspace({
                 <div className="mb-2 flex items-center gap-2 text-xs text-[#8b8998]">
                   My boards <ChevronRight size={13} /> {activeBoard.name}
                 </div>
-                <div className="relative flex items-center gap-2">
+                <div ref={boardMenuRef} className="relative flex items-center gap-2">
                   <h1 className="text-3xl font-semibold tracking-[-0.035em] text-[#222033] md:text-4xl">
                     {activeBoard.name}
                   </h1>
@@ -1172,7 +1539,7 @@ export function BoardWorkspace({
               sensors={sensors}
               collisionDetection={collisionDetectionStrategy}
               onDragOver={handleDragOver}
-              onDragEnd={handleDragEnd}
+              onDragEnd={handleWorkspaceDragEnd}
               accessibility={{
                 screenReaderInstructions: {
                   draggable:
@@ -1180,40 +1547,31 @@ export function BoardWorkspace({
                 },
               }}
             >
-              <div className="space-y-7">
-                {activeGroups.map((group) => {
+              <SortableContext
+                id="board-groups"
+                items={activeGroups.map((group) => `board-group:${group.id}`)}
+                strategy={verticalListSortingStrategy}
+              >
+                <div className="space-y-7">
+                  {activeGroups.map((group) => {
                 const groupItems = filteredItems.filter((item) => item.group_id === group.id);
                 const collapsed = collapsedGroups.has(group.id);
                 return (
-                  <section key={group.id}>
-                    <button
-                      className="mb-2 flex items-center gap-2 text-left"
-                      onClick={() =>
-                        setCollapsedGroups((current) => {
-                          const next = new Set(current);
-                          if (next.has(group.id)) {
-                            next.delete(group.id);
-                          } else {
-                            next.add(group.id);
-                          }
-                          return next;
-                        })
-                      }
-                    >
-                      <ChevronDown
-                        size={18}
-                        className={`transition ${collapsed ? "-rotate-90" : ""}`}
-                        style={{ color: group.color }}
-                      />
-                      <span
-                        className="text-lg font-semibold"
-                        style={{ color: group.color }}
-                      >
-                        {group.name}
-                      </span>
-                      <span className="text-xs text-[#aaa8b4]">{groupItems.length} items</span>
-                    </button>
-
+                  <SortableBoardGroup
+                    key={group.id}
+                    group={group}
+                    itemCount={groupItems.length}
+                    collapsed={collapsed}
+                    onToggle={() =>
+                      setCollapsedGroups((current) => {
+                        const next = new Set(current);
+                        if (next.has(group.id)) next.delete(group.id);
+                        else next.add(group.id);
+                        return next;
+                      })
+                    }
+                    onEdit={() => setEditingGroup(group)}
+                  >
                     {!collapsed && (
                       <>
                         <DesktopTable
@@ -1251,10 +1609,11 @@ export function BoardWorkspace({
                         />
                       </>
                     )}
-                  </section>
+                  </SortableBoardGroup>
                 );
                 })}
-              </div>
+                </div>
+              </SortableContext>
             </DndContext>
           </div>
         )}
@@ -1288,6 +1647,13 @@ export function BoardWorkspace({
           onDelete={deleteColumn}
         />
       )}
+      {editingGroup && (
+        <GroupEditor
+          group={editingGroup}
+          onClose={() => setEditingGroup(null)}
+          onSave={saveGroup}
+        />
+      )}
       {activeItem && (
         <ItemPanel
           item={activeItem}
@@ -1302,6 +1668,203 @@ export function BoardWorkspace({
         <div className="fixed bottom-5 left-1/2 z-80 max-w-[calc(100%-2rem)] -translate-x-1/2 rounded-xl bg-[#242137] px-4 py-3 text-sm text-white shadow-2xl">
           {toast}
         </div>
+      )}
+    </div>
+  );
+}
+
+function SidebarRoot({
+  entries,
+  boards,
+  activeBoardId,
+  collapsedFolders,
+  onSelectBoard,
+  onToggleFolder,
+  onRenameFolder,
+  onDeleteFolder,
+}: {
+  entries: SidebarEntry[];
+  boards: Board[];
+  activeBoardId: string;
+  collapsedFolders: Set<string>;
+  onSelectBoard: (board: Board) => void;
+  onToggleFolder: (folder: BoardFolder) => void;
+  onRenameFolder: (folder: BoardFolder) => void;
+  onDeleteFolder: (folder: BoardFolder) => void;
+}) {
+  const { setNodeRef, isOver } = useDroppable({ id: "sidebar-root" });
+  return (
+    <SortableContext
+      id="sidebar-top-level"
+      items={entries.map((entry) => entry.id)}
+      strategy={verticalListSortingStrategy}
+    >
+      <div
+        ref={setNodeRef}
+        className={`min-h-8 space-y-1 rounded-lg ${isOver ? "bg-white/5" : ""}`}
+      >
+        {entries.map((entry, index) => (
+          <Fragment key={entry.id}>
+            <SidebarDropGap index={index} />
+            {entry.type === "board" ? (
+              <SidebarBoardRow
+                board={entry.board}
+                active={entry.board.id === activeBoardId}
+                onSelect={onSelectBoard}
+              />
+            ) : (
+              <SidebarFolderRow
+                folder={entry.folder}
+                boards={boards
+                  .filter((board) => board.folder_id === entry.folder.id)
+                  .sort((a, b) => a.position - b.position)}
+                activeBoardId={activeBoardId}
+                collapsed={collapsedFolders.has(entry.folder.id)}
+                onSelectBoard={onSelectBoard}
+                onToggle={onToggleFolder}
+                onRename={onRenameFolder}
+                onDelete={onDeleteFolder}
+              />
+            )}
+          </Fragment>
+        ))}
+        <SidebarDropGap index={entries.length} />
+      </div>
+    </SortableContext>
+  );
+}
+
+function SidebarDropGap({ index }: { index: number }) {
+  const { setNodeRef, isOver } = useDroppable({ id: `sidebar-gap:${index}` });
+  return (
+    <div
+      ref={setNodeRef}
+      className={`-my-1 h-2 rounded-full transition-all ${
+        isOver ? "h-3 bg-[#918bff]" : ""
+      }`}
+    />
+  );
+}
+
+function SidebarBoardRow({
+  board,
+  active,
+  onSelect,
+}: {
+  board: Board;
+  active: boolean;
+  onSelect: (board: Board) => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id: `sidebar-board:${board.id}` });
+  return (
+    <button
+      ref={setNodeRef}
+      {...attributes}
+      {...listeners}
+      style={{ transform: CSS.Transform.toString(transform), transition }}
+      onClick={() => onSelect(board)}
+      className={`flex w-full select-none items-center gap-3 rounded-lg px-3 py-2 text-left text-sm transition ${
+        active
+          ? "bg-[#6c63ff] font-medium text-white"
+          : "text-white/65 hover:bg-white/[0.07] hover:text-white"
+      } ${isDragging ? "z-50 opacity-60 shadow-lg" : ""}`}
+    >
+      <span
+        className="size-2.5 shrink-0 rounded-sm"
+        style={{ backgroundColor: board.color }}
+      />
+      <span className="truncate">{board.name}</span>
+    </button>
+  );
+}
+
+function SidebarFolderRow({
+  folder,
+  boards,
+  activeBoardId,
+  collapsed,
+  onSelectBoard,
+  onToggle,
+  onRename,
+  onDelete,
+}: {
+  folder: BoardFolder;
+  boards: Board[];
+  activeBoardId: string;
+  collapsed: boolean;
+  onSelectBoard: (board: Board) => void;
+  onToggle: (folder: BoardFolder) => void;
+  onRename: (folder: BoardFolder) => void;
+  onDelete: (folder: BoardFolder) => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id: `sidebar-folder:${folder.id}` });
+  const { setNodeRef: setDropRef, isOver } = useDroppable({
+    id: `folder-items:${folder.id}`,
+  });
+  return (
+    <div
+      ref={setNodeRef}
+      style={{ transform: CSS.Transform.toString(transform), transition }}
+      className={`mb-1 rounded-lg ${isDragging ? "z-50 opacity-60" : ""}`}
+    >
+      <div className="group flex items-center">
+        <button
+          className="flex min-w-0 flex-1 select-none items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs font-medium text-white/55 hover:bg-white/5 hover:text-white"
+          onClick={() => onToggle(folder)}
+          {...attributes}
+          {...listeners}
+        >
+          <ChevronDown
+            size={13}
+            className={`shrink-0 transition ${collapsed ? "-rotate-90" : ""}`}
+          />
+          <Folder size={14} className="shrink-0" />
+          <span className="truncate">{folder.name}</span>
+        </button>
+        <button
+          className="hidden rounded p-1 text-white/35 hover:bg-white/10 hover:text-white group-hover:block"
+          aria-label={`Rename ${folder.name}`}
+          onClick={() => onRename(folder)}
+        >
+          <Pencil size={12} />
+        </button>
+        <button
+          className="hidden rounded p-1 text-white/35 hover:bg-white/10 hover:text-red-300 group-hover:block"
+          aria-label={`Remove ${folder.name}`}
+          onClick={() => onDelete(folder)}
+        >
+          <X size={13} />
+        </button>
+      </div>
+      {!collapsed && (
+        <SortableContext
+          id={`sidebar-folder-items:${folder.id}`}
+          items={boards.map((board) => `sidebar-board:${board.id}`)}
+          strategy={verticalListSortingStrategy}
+        >
+          <div
+            ref={setDropRef}
+            className={`ml-3 min-h-8 border-l pl-2 transition ${
+              isOver ? "border-[#918bff] bg-white/10" : "border-white/10"
+            }`}
+          >
+            {boards.map((board) => (
+              <SidebarBoardRow
+                key={board.id}
+                board={board}
+                active={board.id === activeBoardId}
+                onSelect={onSelectBoard}
+              />
+            ))}
+            {boards.length === 0 && (
+              <p className="px-3 py-1.5 text-[11px] text-white/25">
+                Drop a board here
+              </p>
+            )}
+          </div>
+        </SortableContext>
       )}
     </div>
   );
@@ -1406,6 +1969,62 @@ function ValueCell({ item, column, onUpdate }: CellProps) {
       defaultValue={typeof value === "string" ? value : ""}
       onBlur={(event) => onUpdate(item, column.id, event.target.value)}
     />
+  );
+}
+
+function SortableBoardGroup({
+  group,
+  itemCount,
+  collapsed,
+  onToggle,
+  onEdit,
+  children,
+}: {
+  group: Group;
+  itemCount: number;
+  collapsed: boolean;
+  onToggle: () => void;
+  onEdit: () => void;
+  children: React.ReactNode;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id: `board-group:${group.id}` });
+  return (
+    <section
+      ref={setNodeRef}
+      style={{ transform: CSS.Transform.toString(transform), transition }}
+      className={isDragging ? "relative z-30 opacity-60" : ""}
+    >
+      <div className="mb-2 flex items-center gap-1">
+        <button
+          className="touch-none rounded-md p-1 text-[#aaa8b4] hover:bg-white hover:text-[#656273] focus:outline-none focus:ring-2 focus:ring-[#6c63ff]"
+          aria-label={`Move ${group.name}`}
+          {...attributes}
+          {...listeners}
+        >
+          <GripVertical size={15} />
+        </button>
+        <button className="flex items-center gap-2 text-left" onClick={onToggle}>
+          <ChevronDown
+            size={18}
+            className={`transition ${collapsed ? "-rotate-90" : ""}`}
+            style={{ color: group.color }}
+          />
+          <span className="text-lg font-semibold" style={{ color: group.color }}>
+            {group.name}
+          </span>
+          <span className="text-xs text-[#aaa8b4]">{itemCount} items</span>
+        </button>
+        <button
+          className="rounded-md p-1 text-[#aaa8b4] hover:bg-white hover:text-[#656273]"
+          aria-label={`Edit ${group.name}`}
+          onClick={onEdit}
+        >
+          <MoreHorizontal size={16} />
+        </button>
+      </div>
+      {children}
+    </section>
   );
 }
 
@@ -1924,6 +2543,62 @@ function ColumnEditor({
           Save changes
         </button>
       </div>
+    </ModalShell>
+  );
+}
+
+function GroupEditor({
+  group,
+  onClose,
+  onSave,
+}: {
+  group: Group;
+  onClose: () => void;
+  onSave: (group: Group) => void;
+}) {
+  const [draft, setDraft] = useState(group);
+  return (
+    <ModalShell onClose={onClose}>
+      <div className="flex items-center justify-between">
+        <h2 className="text-xl font-semibold">Group settings</h2>
+        <button className="rounded-lg p-2 hover:bg-[#f2f2f6]" onClick={onClose}>
+          <X size={19} />
+        </button>
+      </div>
+      <label className="mt-6 block text-sm font-medium">
+        Name
+        <input
+          autoFocus
+          className="mt-2 h-11 w-full rounded-xl border border-[#dedde6] px-3 outline-none focus:border-[#6c63ff]"
+          value={draft.name}
+          onChange={(event) => setDraft({ ...draft, name: event.target.value })}
+        />
+      </label>
+      <div className="mt-5">
+        <p className="mb-3 text-sm font-medium">Color</p>
+        <div className="flex flex-wrap gap-3">
+          {COLORS.map((color) => (
+            <button
+              key={color}
+              className={`size-8 rounded-full border-2 border-white ring-offset-2 ${
+                draft.color === color
+                  ? "ring-2 ring-[#6c63ff]"
+                  : "ring-1 ring-[#dedde6]"
+              }`}
+              style={{ backgroundColor: color }}
+              aria-label={`Set group color to ${color}`}
+              onClick={() => setDraft({ ...draft, color })}
+            />
+          ))}
+        </div>
+      </div>
+      <button
+        className="mt-7 h-11 w-full rounded-xl bg-[#6c63ff] text-sm font-semibold text-white disabled:opacity-40"
+        disabled={!draft.name.trim()}
+        onClick={() => onSave(draft)}
+      >
+        Save changes
+      </button>
     </ModalShell>
   );
 }
