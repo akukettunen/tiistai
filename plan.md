@@ -1,0 +1,2 @@
+- We have boards that are essentially lists of items.
+- Items have columns, of which you will implement the most important ones. Labels for severity and categorizing are important. Also, long text.
