@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Tuesday — Product workspace",
-  description: "A focused personal workspace for features, tasks, and ideas.",
+  description: "A focused personal workspace for boards and docs.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

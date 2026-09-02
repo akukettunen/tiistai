@@ -4,18 +4,20 @@ import {
   CalendarDays,
   Check,
   Archive,
+  ArrowRightLeft,
   ChevronDown,
   ChevronRight,
   CirclePlus,
   Columns3,
+  FileText,
   Folder,
-  FolderPlus,
   GripVertical,
   LayoutGrid,
   Layers3,
   LogOut,
   Menu,
   MoreHorizontal,
+  PanelRight,
   Plus,
   Pencil,
   RotateCcw,
@@ -50,6 +52,13 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { createClient } from "@/lib/supabase/client";
+import { DocPane } from "@/components/doc-pane";
+import {
+  DOC_COLORS,
+  EMPTY_DOC_CONTENT,
+  type Doc,
+} from "@/lib/docs";
+import type { JSONContent } from "@tiptap/react";
 
 type Board = {
   id: string;
@@ -81,6 +90,12 @@ type SidebarEntry =
       position: number;
       type: "board";
       board: Board;
+    }
+  | {
+      id: string;
+      position: number;
+      type: "doc";
+      doc: Doc;
     };
 
 type Group = {
@@ -130,6 +145,7 @@ type Props = {
   user: { id: string; email: string };
   initialBoards: Board[];
   initialFolders: BoardFolder[];
+  initialDocs?: Doc[];
   initialGroups: Group[];
   initialColumns: BoardColumn[];
   initialItems: Item[];
@@ -154,6 +170,7 @@ const collisionDetectionStrategy: CollisionDetection = (args) => {
     const activeId = String(args.active.id);
     if (
       activeId.startsWith("sidebar-board:") ||
+      activeId.startsWith("sidebar-doc:") ||
       activeId.startsWith("sidebar-folder:")
     ) {
       const gapCollision = pointerCollisions.find((collision) =>
@@ -161,13 +178,17 @@ const collisionDetectionStrategy: CollisionDetection = (args) => {
       );
       if (gapCollision) return [gapCollision];
     }
-    if (activeId.startsWith("sidebar-board:")) {
-      const boardCollision = pointerCollisions.find(
+    if (
+      activeId.startsWith("sidebar-board:") ||
+      activeId.startsWith("sidebar-doc:")
+    ) {
+      const itemCollision = pointerCollisions.find(
         (collision) =>
-          String(collision.id).startsWith("sidebar-board:") &&
+          (String(collision.id).startsWith("sidebar-board:") ||
+            String(collision.id).startsWith("sidebar-doc:")) &&
           collision.id !== args.active.id,
       );
-      if (boardCollision) return [boardCollision];
+      if (itemCollision) return [itemCollision];
       const folderCollision = pointerCollisions.find((collision) =>
         String(collision.id).startsWith("folder-items:"),
       );
@@ -181,7 +202,8 @@ const collisionDetectionStrategy: CollisionDetection = (args) => {
       const topLevelCollision = pointerCollisions.find(
         (collision) =>
           String(collision.id).startsWith("sidebar-folder:") ||
-          String(collision.id).startsWith("sidebar-board:"),
+          String(collision.id).startsWith("sidebar-board:") ||
+          String(collision.id).startsWith("sidebar-doc:"),
       );
       if (topLevelCollision) return [topLevelCollision];
     }
@@ -267,10 +289,44 @@ function makeId() {
   return crypto.randomUUID();
 }
 
+function remapColumnValues(
+  values: Record<string, string | boolean | null>,
+  sourceColumns: BoardColumn[],
+  targetColumns: BoardColumn[],
+) {
+  const next: Record<string, string | boolean | null> = {};
+  for (const source of sourceColumns) {
+    const value = values[source.id];
+    if (value === undefined || value === null || value === "") continue;
+    const target = targetColumns.find(
+      (column) =>
+        column.type === source.type &&
+        column.title.toLowerCase() === source.title.toLowerCase(),
+    );
+    if (!target) continue;
+    if (source.type === "label" && typeof value === "string") {
+      const sourceOption = source.settings.options?.find((option) => option.id === value);
+      const targetOption =
+        target.settings.options?.find((option) => option.id === value) ??
+        (sourceOption
+          ? target.settings.options?.find(
+              (option) =>
+                option.label.toLowerCase() === sourceOption.label.toLowerCase(),
+            )
+          : undefined);
+      if (targetOption) next[target.id] = targetOption.id;
+      continue;
+    }
+    next[target.id] = value;
+  }
+  return next;
+}
+
 export function BoardWorkspace({
   user,
   initialBoards,
   initialFolders,
+  initialDocs = [],
   initialGroups,
   initialColumns,
   initialItems,
@@ -281,12 +337,19 @@ export function BoardWorkspace({
   const supabase = useMemo(() => createClient(), []);
   const [boards, setBoards] = useState(initialBoards);
   const [folders, setFolders] = useState(initialFolders);
+  const [docs, setDocs] = useState(initialDocs);
   const [groups, setGroups] = useState(initialGroups);
   const [columns, setColumns] = useState(initialColumns);
   const [items, setItems] = useState(initialItems);
   const [automations, setAutomations] = useState(initialAutomations);
+  const [activeKind, setActiveKind] = useState<"board" | "doc">(
+    initialBoards.some((board) => !board.archived_at) ? "board" : "doc",
+  );
   const [activeBoardId, setActiveBoardId] = useState(
     initialBoards.find((board) => !board.archived_at)?.id ?? "",
+  );
+  const [activeDocId, setActiveDocId] = useState(
+    initialDocs.find((doc) => !doc.archived_at)?.id ?? "",
   );
   const [query, setQuery] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -295,14 +358,27 @@ export function BoardWorkspace({
   const [columnModalOpen, setColumnModalOpen] = useState(false);
   const [automationsOpen, setAutomationsOpen] = useState(false);
   const [boardMenuOpen, setBoardMenuOpen] = useState(false);
+  const [docMenuOpen, setDocMenuOpen] = useState(false);
+  const [newMenuOpen, setNewMenuOpen] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set());
   const [editingColumn, setEditingColumn] = useState<BoardColumn | null>(null);
   const [editingGroup, setEditingGroup] = useState<Group | null>(null);
   const boardMenuRef = useRef<HTMLDivElement>(null);
+  const docMenuRef = useRef<HTMLDivElement>(null);
+  const newMenuRef = useRef<HTMLDivElement>(null);
   const [activeItem, setActiveItem] = useState<Item | null>(null);
+  const [movingItem, setMovingItem] = useState<Item | null>(null);
   const [toast, setToast] = useState<string | null>(initialError);
   const [creatingBoard, setCreatingBoard] = useState(false);
+  const [creatingDoc, setCreatingDoc] = useState(false);
+  const [focusTitle, setFocusTitle] = useState(false);
+  const [docSaveState, setDocSaveState] = useState<"saved" | "saving" | "error">(
+    "saved",
+  );
+  const saveTimer = useRef<number | null>(null);
+  const pendingPatch = useRef<Partial<Doc>>({});
+  const pendingDocId = useRef<string | null>(null);
   const sensors = useSensors(
     useSensor(MouseSensor, { activationConstraint: { distance: 4 } }),
     useSensor(TouchSensor, {
@@ -312,10 +388,17 @@ export function BoardWorkspace({
   );
 
   const activeBoard = boards.find((board) => board.id === activeBoardId);
+  const activeDoc = docs.find((doc) => doc.id === activeDocId);
   const activeBoards = boards.filter((board) => !board.archived_at);
+  const activeDocs = docs.filter((doc) => !doc.archived_at);
   const archivedBoards = boards.filter((board) => board.archived_at);
+  const archivedDocs = docs.filter((doc) => doc.archived_at);
+  const visibleDocs = activeDocs.filter(
+    (doc) => !query || doc.title.toLowerCase().includes(query.toLowerCase()),
+  );
   const rootBoards = activeBoards.filter((board) => !board.folder_id);
-  const sidebarEntries = [
+  const rootDocs = visibleDocs.filter((doc) => !doc.folder_id);
+  const sidebarEntries: SidebarEntry[] = [
     ...folders.map((folder) => ({
       id: `sidebar-folder:${folder.id}`,
       position: folder.position,
@@ -327,6 +410,12 @@ export function BoardWorkspace({
       position: board.position,
       type: "board" as const,
       board,
+    })),
+    ...rootDocs.map((doc) => ({
+      id: `sidebar-doc:${doc.id}`,
+      position: doc.position,
+      type: "doc" as const,
+      doc,
     })),
   ].sort((a, b) => a.position - b.position);
   const activeGroups = groups
@@ -354,6 +443,34 @@ export function BoardWorkspace({
     return () => document.removeEventListener("pointerdown", closeOnOutsidePress);
   }, [boardMenuOpen]);
 
+  useEffect(() => {
+    if (!docMenuOpen) return;
+    function closeOnOutsidePress(event: PointerEvent) {
+      if (!docMenuRef.current?.contains(event.target as Node)) {
+        setDocMenuOpen(false);
+      }
+    }
+    document.addEventListener("pointerdown", closeOnOutsidePress);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePress);
+  }, [docMenuOpen]);
+
+  useEffect(() => {
+    if (!newMenuOpen) return;
+    function closeOnOutsidePress(event: PointerEvent) {
+      if (!newMenuRef.current?.contains(event.target as Node)) {
+        setNewMenuOpen(false);
+      }
+    }
+    document.addEventListener("pointerdown", closeOnOutsidePress);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePress);
+  }, [newMenuOpen]);
+
+  useEffect(() => {
+    return () => {
+      if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    };
+  }, []);
+
   function notify(message: string) {
     setToast(message);
     window.setTimeout(() => setToast(null), 3200);
@@ -373,7 +490,10 @@ export function BoardWorkspace({
         name,
         owner_id: user.id,
         color,
-        position: folders.length + activeBoards.filter((board) => !board.folder_id).length,
+        position:
+          folders.length +
+          activeBoards.filter((entry) => !entry.folder_id).length +
+          activeDocs.filter((doc) => !doc.folder_id).length,
       })
       .select()
       .single();
@@ -416,6 +536,7 @@ export function BoardWorkspace({
     if (createdColumns) {
       setColumns((current) => [...current, ...(createdColumns as BoardColumn[])]);
     }
+    setActiveKind("board");
     setActiveBoardId(board.id);
     setCreatingBoard(false);
     setSidebarOpen(false);
@@ -465,9 +586,16 @@ export function BoardWorkspace({
         entry.id === board.id ? { ...entry, archived_at: archivedAt } : entry,
       ),
     );
-    setActiveBoardId(
-      activeBoards.find((entry) => entry.id !== board.id)?.id ?? "",
-    );
+    const nextBoard = activeBoards.find((entry) => entry.id !== board.id);
+    if (nextBoard) {
+      setActiveKind("board");
+      setActiveBoardId(nextBoard.id);
+    } else {
+      const nextDoc = activeDocs[0];
+      setActiveKind(nextDoc ? "doc" : "board");
+      setActiveBoardId("");
+      if (nextDoc) setActiveDocId(nextDoc.id);
+    }
     setBoardMenuOpen(false);
     notify("Board archived");
   }
@@ -483,9 +611,179 @@ export function BoardWorkspace({
         entry.id === board.id ? { ...entry, archived_at: null } : entry,
       ),
     );
+    setActiveKind("board");
     setActiveBoardId(board.id);
     setShowArchived(false);
     setSidebarOpen(false);
+  }
+
+  async function flushDocSave(nextDocId?: string) {
+    if (saveTimer.current) {
+      window.clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    const docId = pendingDocId.current;
+    const patch = pendingPatch.current;
+    pendingPatch.current = {};
+    pendingDocId.current = nextDocId ?? null;
+    if (!docId || Object.keys(patch).length === 0) return;
+    setDocSaveState("saving");
+    const { error } = await supabase
+      .from("docs")
+      .update({ ...patch, updated_at: new Date().toISOString() })
+      .eq("id", docId);
+    if (error) {
+      setDocSaveState("error");
+      notify(error.message);
+      return;
+    }
+    setDocSaveState("saved");
+  }
+
+  function scheduleDocSave(docId: string, patch: Partial<Doc>) {
+    pendingDocId.current = docId;
+    pendingPatch.current = { ...pendingPatch.current, ...patch };
+    if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(() => {
+      void flushDocSave();
+    }, 700);
+  }
+
+  function updateDoc(docId: string, patch: Partial<Doc>) {
+    setDocs((current) =>
+      current.map((doc) => (doc.id === docId ? { ...doc, ...patch } : doc)),
+    );
+    scheduleDocSave(docId, patch);
+  }
+
+  async function createDoc() {
+    setCreatingDoc(true);
+    const previousColor = activeDocs.at(-1)?.color;
+    const previousColorIndex = previousColor ? DOC_COLORS.indexOf(previousColor) : -1;
+    const color = DOC_COLORS[(previousColorIndex + 1) % DOC_COLORS.length];
+    const { data, error } = await supabase
+      .from("docs")
+      .insert({
+        owner_id: user.id,
+        title: "Untitled",
+        color,
+        position:
+          folders.length +
+          activeBoards.filter((board) => !board.folder_id).length +
+          activeDocs.filter((doc) => !doc.folder_id).length,
+        content: EMPTY_DOC_CONTENT,
+      })
+      .select()
+      .single();
+    if (error || !data) {
+      notify(error?.message ?? "Could not create doc.");
+      setCreatingDoc(false);
+      return;
+    }
+    await flushDocSave(data.id);
+    setDocs((current) => [...current, data as Doc]);
+    setActiveKind("doc");
+    setActiveDocId(data.id);
+    setFocusTitle(true);
+    setCreatingDoc(false);
+    setSidebarOpen(false);
+  }
+
+  async function archiveDoc(doc: Doc) {
+    if (!window.confirm(`Archive “${doc.title}”?`)) return;
+    const archivedAt = new Date().toISOString();
+    const { error } = await supabase
+      .from("docs")
+      .update({ archived_at: archivedAt, updated_at: archivedAt })
+      .eq("id", doc.id);
+    if (error) return notify(error.message);
+    setDocs((current) =>
+      current.map((entry) =>
+        entry.id === doc.id ? { ...entry, archived_at: archivedAt } : entry,
+      ),
+    );
+    const nextDoc = activeDocs.find((entry) => entry.id !== doc.id);
+    if (nextDoc) {
+      setActiveKind("doc");
+      setActiveDocId(nextDoc.id);
+    } else {
+      const nextBoard = activeBoards[0];
+      setActiveKind(nextBoard ? "board" : "doc");
+      setActiveDocId("");
+      if (nextBoard) setActiveBoardId(nextBoard.id);
+    }
+    setDocMenuOpen(false);
+    notify("Doc archived");
+  }
+
+  async function restoreDoc(doc: Doc) {
+    const { error } = await supabase
+      .from("docs")
+      .update({ archived_at: null, updated_at: new Date().toISOString() })
+      .eq("id", doc.id);
+    if (error) return notify(error.message);
+    setDocs((current) =>
+      current.map((entry) =>
+        entry.id === doc.id ? { ...entry, archived_at: null } : entry,
+      ),
+    );
+    setActiveKind("doc");
+    setActiveDocId(doc.id);
+    setShowArchived(false);
+    setSidebarOpen(false);
+  }
+
+  async function deleteDoc(doc: Doc) {
+    if (!window.confirm(`Delete “${doc.title}” permanently?`)) return;
+    const { error } = await supabase.from("docs").delete().eq("id", doc.id);
+    if (error) return notify(error.message);
+    setDocs((current) => current.filter((entry) => entry.id !== doc.id));
+    const nextDoc = activeDocs.find((entry) => entry.id !== doc.id);
+    if (nextDoc) {
+      setActiveKind("doc");
+      setActiveDocId(nextDoc.id);
+    } else {
+      const nextBoard = activeBoards[0];
+      setActiveKind(nextBoard ? "board" : "doc");
+      setActiveDocId("");
+      if (nextBoard) setActiveBoardId(nextBoard.id);
+    }
+    setDocMenuOpen(false);
+    notify("Doc deleted");
+  }
+
+  async function moveDocToFolder(doc: Doc, folderId: string | null) {
+    const { error } = await supabase
+      .from("docs")
+      .update({ folder_id: folderId, updated_at: new Date().toISOString() })
+      .eq("id", doc.id);
+    if (error) return notify(error.message);
+    setDocs((current) =>
+      current.map((entry) =>
+        entry.id === doc.id ? { ...entry, folder_id: folderId } : entry,
+      ),
+    );
+    setDocMenuOpen(false);
+  }
+
+  function selectBoard(board: Board) {
+    void flushDocSave();
+    setActiveKind("board");
+    setActiveBoardId(board.id);
+    setSidebarOpen(false);
+    setBoardMenuOpen(false);
+    setDocMenuOpen(false);
+    setFocusTitle(false);
+  }
+
+  function selectDoc(doc: Doc) {
+    void flushDocSave();
+    setActiveKind("doc");
+    setActiveDocId(doc.id);
+    setSidebarOpen(false);
+    setBoardMenuOpen(false);
+    setDocMenuOpen(false);
+    setFocusTitle(false);
   }
 
   async function createFolder() {
@@ -496,7 +794,10 @@ export function BoardWorkspace({
       .insert({
         owner_id: user.id,
         name,
-        position: folders.length + activeBoards.filter((board) => !board.folder_id).length,
+        position:
+          folders.length +
+          activeBoards.filter((board) => !board.folder_id).length +
+          activeDocs.filter((doc) => !doc.folder_id).length,
       })
       .select()
       .single();
@@ -518,7 +819,7 @@ export function BoardWorkspace({
   }
 
   async function deleteFolder(folder: BoardFolder) {
-    if (!window.confirm(`Remove the “${folder.name}” group? Boards will become ungrouped.`)) {
+    if (!window.confirm(`Remove the “${folder.name}” group? Items will become ungrouped.`)) {
       return;
     }
     const { error: boardError } = await supabase
@@ -526,6 +827,11 @@ export function BoardWorkspace({
       .update({ folder_id: null, updated_at: new Date().toISOString() })
       .eq("folder_id", folder.id);
     if (boardError) return notify(boardError.message);
+    const { error: docsError } = await supabase
+      .from("docs")
+      .update({ folder_id: null, updated_at: new Date().toISOString() })
+      .eq("folder_id", folder.id);
+    if (docsError) return notify(docsError.message);
     const { error } = await supabase
       .from("board_folders")
       .delete()
@@ -534,6 +840,11 @@ export function BoardWorkspace({
     setBoards((current) =>
       current.map((board) =>
         board.folder_id === folder.id ? { ...board, folder_id: null } : board,
+      ),
+    );
+    setDocs((current) =>
+      current.map((doc) =>
+        doc.folder_id === folder.id ? { ...doc, folder_id: null } : doc,
       ),
     );
     setFolders((current) => current.filter((entry) => entry.id !== folder.id));
@@ -556,9 +867,11 @@ export function BoardWorkspace({
   async function persistSidebarOrder(
     nextBoards: Board[],
     nextFolders: BoardFolder[],
+    nextDocs: Doc[] = docs,
   ) {
     setBoards(nextBoards);
     setFolders(nextFolders);
+    setDocs(nextDocs);
     const results = await Promise.all([
       ...nextBoards.map((board) =>
         supabase
@@ -571,6 +884,12 @@ export function BoardWorkspace({
           .from("board_folders")
           .update({ position: folder.position })
           .eq("id", folder.id),
+      ),
+      ...nextDocs.map((doc) =>
+        supabase
+          .from("docs")
+          .update({ folder_id: doc.folder_id, position: doc.position })
+          .eq("id", doc.id),
       ),
     ]);
     const error = results.find((result) => result.error)?.error;
@@ -592,7 +911,8 @@ export function BoardWorkspace({
         overId !== "sidebar-root" &&
         !overId.startsWith("sidebar-gap:") &&
         !overId.startsWith("sidebar-folder:") &&
-        !overId.startsWith("sidebar-board:")
+        !overId.startsWith("sidebar-board:") &&
+        !overId.startsWith("sidebar-doc:")
       ) {
         return;
       }
@@ -641,62 +961,136 @@ export function BoardWorkspace({
             ? (positions.get(`sidebar-board:${board.id}`) ?? board.position)
             : board.position,
       }));
-      await persistSidebarOrder(nextBoards, nextFolders);
+      const nextDocs = docs.map((doc) => ({
+        ...doc,
+        position:
+          doc.folder_id === null
+            ? (positions.get(`sidebar-doc:${doc.id}`) ?? doc.position)
+            : doc.position,
+      }));
+      await persistSidebarOrder(nextBoards, nextFolders, nextDocs);
       return;
     }
 
-    if (!activeId.startsWith("sidebar-board:")) return;
-    const boardId = activeId.replace("sidebar-board:", "");
-    const movingBoard = boards.find((board) => board.id === boardId);
-    if (!movingBoard) return;
+    if (
+      !activeId.startsWith("sidebar-board:") &&
+      !activeId.startsWith("sidebar-doc:")
+    ) {
+      return;
+    }
+    const movingKind = activeId.startsWith("sidebar-board:") ? "board" : "doc";
+    const movingId = activeId.replace(/^sidebar-(?:board|doc):/, "");
+    const movingBoard = boards.find((board) => board.id === movingId);
+    const movingDoc = docs.find((doc) => doc.id === movingId);
+    if (movingKind === "board" ? !movingBoard : !movingDoc) return;
+
     const overBoard = overId.startsWith("sidebar-board:")
-      ? boards.find(
-          (board) => board.id === overId.replace("sidebar-board:", ""),
-        )
+      ? boards.find((board) => board.id === overId.replace("sidebar-board:", ""))
       : undefined;
+    const overDoc = overId.startsWith("sidebar-doc:")
+      ? docs.find((doc) => doc.id === overId.replace("sidebar-doc:", ""))
+      : undefined;
+    const previousFolderId =
+      movingKind === "board"
+        ? (movingBoard?.folder_id ?? null)
+        : (movingDoc?.folder_id ?? null);
     const targetFolderId = overId.startsWith("folder-items:")
       ? overId.replace("folder-items:", "")
       : overId.startsWith("sidebar-folder:")
         ? overId.replace("sidebar-folder:", "")
-        : overBoard?.folder_id ?? null;
+        : (overBoard?.folder_id ?? overDoc?.folder_id ?? null);
 
     let nextBoards = boards.map((board) => ({ ...board }));
+    let nextDocs = docs.map((doc) => ({ ...doc }));
     let nextFolders = folders.map((folder) => ({ ...folder }));
 
     if (targetFolderId) {
-      const destination = nextBoards
-        .filter(
-          (board) =>
-            board.folder_id === targetFolderId && board.id !== movingBoard.id,
-        )
-        .sort((a, b) => a.position - b.position);
+      const destination = [
+        ...nextBoards
+          .filter(
+            (board) =>
+              board.folder_id === targetFolderId &&
+              !(movingKind === "board" && board.id === movingId),
+          )
+          .map((board) => ({
+            key: `sidebar-board:${board.id}`,
+            kind: "board" as const,
+            id: board.id,
+            position: board.position,
+          })),
+        ...nextDocs
+          .filter(
+            (doc) =>
+              doc.folder_id === targetFolderId &&
+              !(movingKind === "doc" && doc.id === movingId),
+          )
+          .map((doc) => ({
+            key: `sidebar-doc:${doc.id}`,
+            kind: "doc" as const,
+            id: doc.id,
+            position: doc.position,
+          })),
+      ].sort((a, b) => a.position - b.position);
       const overIndex = overBoard
-        ? destination.findIndex((board) => board.id === overBoard.id)
-        : -1;
+        ? destination.findIndex((entry) => entry.id === overBoard.id)
+        : overDoc
+          ? destination.findIndex((entry) => entry.id === overDoc.id)
+          : -1;
       destination.splice(
         overIndex < 0 ? destination.length : overIndex + (dropAfter ? 1 : 0),
         0,
         {
-          ...movingBoard,
-          folder_id: targetFolderId,
+          key: activeId,
+          kind: movingKind,
+          id: movingId,
+          position: 0,
         },
       );
       const destinationPositions = new Map(
-        destination.map((board, position) => [board.id, position]),
+        destination.map((entry, position) => [entry.key, position]),
       );
       nextBoards = nextBoards.map((board) =>
-        destinationPositions.has(board.id)
+        destinationPositions.has(`sidebar-board:${board.id}`) ||
+        (movingKind === "board" && board.id === movingId)
           ? {
               ...board,
               folder_id: targetFolderId,
-              position: destinationPositions.get(board.id)!,
+              position:
+                destinationPositions.get(`sidebar-board:${board.id}`) ??
+                board.position,
             }
           : board,
+      );
+      nextDocs = nextDocs.map((doc) =>
+        destinationPositions.has(`sidebar-doc:${doc.id}`) ||
+        (movingKind === "doc" && doc.id === movingId)
+          ? {
+              ...doc,
+              folder_id: targetFolderId,
+              position:
+                destinationPositions.get(`sidebar-doc:${doc.id}`) ?? doc.position,
+            }
+          : doc,
       );
     } else {
       const withoutMoving = sidebarEntries.filter(
         (entry) => entry.id !== activeId,
       );
+      const movingEntry =
+        sidebarEntries.find((entry) => entry.id === activeId) ??
+        (movingKind === "board"
+          ? {
+              id: activeId,
+              position: 0,
+              type: "board" as const,
+              board: { ...movingBoard!, folder_id: null },
+            }
+          : {
+              id: activeId,
+              position: 0,
+              type: "doc" as const,
+              doc: { ...movingDoc!, folder_id: null },
+            });
       const targetIndex =
         overId === "sidebar-root"
           ? dropAfter
@@ -715,19 +1109,25 @@ export function BoardWorkspace({
                 ),
               )
             : withoutMoving.findIndex((entry) => entry.id === overId);
-      const movedEntry = {
-        id: activeId,
-        position: 0,
-        type: "board" as const,
-        board: { ...movingBoard, folder_id: null },
-      };
       withoutMoving.splice(
         targetIndex < 0
           ? withoutMoving.length
           : targetIndex +
             (overId.startsWith("sidebar-gap:") ? 0 : dropAfter ? 1 : 0),
         0,
-        movedEntry,
+        movingKind === "board"
+          ? {
+              id: activeId,
+              position: 0,
+              type: "board" as const,
+              board: { ...movingBoard!, folder_id: null },
+            }
+          : {
+              id: activeId,
+              position: 0,
+              type: "doc" as const,
+              doc: { ...movingDoc!, folder_id: null },
+            },
       );
       const rootPositions = new Map(
         withoutMoving.map((entry, position) => [entry.id, position]),
@@ -738,7 +1138,7 @@ export function BoardWorkspace({
           rootPositions.get(`sidebar-folder:${folder.id}`) ?? folder.position,
       }));
       nextBoards = nextBoards.map((board) =>
-        board.id === movingBoard.id
+        board.id === movingId && movingKind === "board"
           ? {
               ...board,
               folder_id: null,
@@ -753,27 +1153,65 @@ export function BoardWorkspace({
               }
             : board,
       );
+      nextDocs = nextDocs.map((doc) =>
+        doc.id === movingId && movingKind === "doc"
+          ? {
+              ...doc,
+              folder_id: null,
+              position: rootPositions.get(activeId) ?? doc.position,
+            }
+          : doc.folder_id === null
+            ? {
+                ...doc,
+                position:
+                  rootPositions.get(`sidebar-doc:${doc.id}`) ?? doc.position,
+              }
+            : doc,
+      );
     }
 
-    if (movingBoard.folder_id && movingBoard.folder_id !== targetFolderId) {
-      const source = nextBoards
-        .filter(
-          (board) =>
-            board.folder_id === movingBoard.folder_id &&
-            board.id !== movingBoard.id,
-        )
-        .sort((a, b) => a.position - b.position);
+    if (previousFolderId && previousFolderId !== targetFolderId) {
+      const source = [
+        ...nextBoards
+          .filter(
+            (board) =>
+              board.folder_id === previousFolderId &&
+              !(movingKind === "board" && board.id === movingId),
+          )
+          .map((board) => ({
+            key: `sidebar-board:${board.id}`,
+            position: board.position,
+          })),
+        ...nextDocs
+          .filter(
+            (doc) =>
+              doc.folder_id === previousFolderId &&
+              !(movingKind === "doc" && doc.id === movingId),
+          )
+          .map((doc) => ({
+            key: `sidebar-doc:${doc.id}`,
+            position: doc.position,
+          })),
+      ].sort((a, b) => a.position - b.position);
       const sourcePositions = new Map(
-        source.map((board, position) => [board.id, position]),
+        source.map((entry, position) => [entry.key, position]),
       );
       nextBoards = nextBoards.map((board) =>
-        sourcePositions.has(board.id)
-          ? { ...board, position: sourcePositions.get(board.id)! }
+        sourcePositions.has(`sidebar-board:${board.id}`)
+          ? {
+              ...board,
+              position: sourcePositions.get(`sidebar-board:${board.id}`)!,
+            }
           : board,
+      );
+      nextDocs = nextDocs.map((doc) =>
+        sourcePositions.has(`sidebar-doc:${doc.id}`)
+          ? { ...doc, position: sourcePositions.get(`sidebar-doc:${doc.id}`)! }
+          : doc,
       );
     }
 
-    if (movingBoard.folder_id === null && targetFolderId) {
+    if (previousFolderId === null && targetFolderId) {
       const rootWithoutMoving = sidebarEntries.filter(
         (entry) => entry.id !== activeId,
       );
@@ -790,14 +1228,21 @@ export function BoardWorkspace({
           ? {
               ...board,
               position:
-                rootPositions.get(`sidebar-board:${board.id}`) ??
-                board.position,
+                rootPositions.get(`sidebar-board:${board.id}`) ?? board.position,
             }
           : board,
       );
+      nextDocs = nextDocs.map((doc) =>
+        doc.folder_id === null
+          ? {
+              ...doc,
+              position: rootPositions.get(`sidebar-doc:${doc.id}`) ?? doc.position,
+            }
+          : doc,
+      );
     }
 
-    await persistSidebarOrder(nextBoards, nextFolders);
+    await persistSidebarOrder(nextBoards, nextFolders, nextDocs);
   }
 
   async function addGroup() {
@@ -1003,6 +1448,55 @@ export function BoardWorkspace({
     if (error) return notify(error.message);
     setItems((current) => current.filter((entry) => entry.id !== item.id));
     setActiveItem(null);
+    setMovingItem(null);
+  }
+
+  async function moveItemToBoard(item: Item, boardId: string, groupId: string) {
+    if (item.board_id === boardId && item.group_id === groupId) return;
+    const targetBoard = boards.find((board) => board.id === boardId);
+    const targetGroup = groups.find((group) => group.id === groupId);
+    if (!targetBoard || !targetGroup || targetGroup.board_id !== boardId) {
+      notify("Could not move item.");
+      return;
+    }
+    const sourceColumns = columns.filter((column) => column.board_id === item.board_id);
+    const targetColumns = columns.filter((column) => column.board_id === boardId);
+    const columnValues = remapColumnValues(
+      item.column_values,
+      sourceColumns,
+      targetColumns,
+    );
+    const position = items.filter((entry) => entry.group_id === groupId).length;
+    const nextItem = {
+      ...item,
+      board_id: boardId,
+      group_id: groupId,
+      column_values: columnValues,
+      position,
+    };
+    setItems((current) =>
+      current.map((entry) => (entry.id === item.id ? nextItem : entry)),
+    );
+    setActiveItem(null);
+    setMovingItem(null);
+    const { error } = await supabase
+      .from("items")
+      .update({
+        board_id: boardId,
+        group_id: groupId,
+        column_values: columnValues,
+        position,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", item.id);
+    if (error) {
+      notify(error.message);
+      setItems((current) =>
+        current.map((entry) => (entry.id === item.id ? item : entry)),
+      );
+      return;
+    }
+    notify(`Moved to ${targetBoard.name}`);
   }
 
   async function saveColumn(column: BoardColumn) {
@@ -1267,6 +1761,7 @@ export function BoardWorkspace({
   }
 
   async function signOut() {
+    await flushDocSave();
     await supabase.auth.signOut();
     router.push("/auth");
     router.refresh();
@@ -1303,35 +1798,73 @@ export function BoardWorkspace({
         <div className="mt-4 flex min-h-0 flex-1 flex-col px-3">
           <div className="mb-2 flex items-center justify-between px-3">
             <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-white/35">
-              Boards
+              Workspace
             </p>
             <div className="flex items-center gap-1">
-              <button
-                aria-label="Create board group"
-                className="rounded p-1 text-white/45 hover:bg-white/10 hover:text-white"
-                onClick={createFolder}
-              >
-                <FolderPlus size={14} />
-              </button>
-              {archivedBoards.length > 0 && (
+              {(archivedBoards.length > 0 || archivedDocs.length > 0) && (
                 <button
-                  aria-label="Show archived boards"
-                  className={`rounded p-1 hover:bg-white/10 hover:text-white ${
+                  aria-label="Show archived items"
+                  className={`rounded-md p-1.5 hover:bg-white/10 hover:text-white ${
                     showArchived ? "text-white" : "text-white/45"
                   }`}
                   onClick={() => setShowArchived((value) => !value)}
                 >
-                  <Archive size={14} />
+                  <Archive size={15} />
                 </button>
               )}
-              <button
-                aria-label="Create board"
-                className="rounded p-1 text-white/45 hover:bg-white/10 hover:text-white"
-                onClick={createBoard}
-                disabled={creatingBoard}
-              >
-                <Plus size={15} />
-              </button>
+              <div ref={newMenuRef} className="relative">
+                <button
+                  aria-expanded={newMenuOpen}
+                  aria-haspopup="menu"
+                  className="inline-flex h-7 items-center gap-1 rounded-md bg-white/10 px-2 text-xs font-medium text-white hover:bg-white/16"
+                  onClick={() => setNewMenuOpen((value) => !value)}
+                >
+                  <Plus size={13} strokeWidth={2.4} />
+                  New
+                </button>
+                {newMenuOpen && (
+                  <div
+                    role="menu"
+                    className="absolute right-0 z-50 mt-1.5 w-40 rounded-lg border border-white/10 bg-[#221f3a] p-1 shadow-xl"
+                  >
+                    <button
+                      role="menuitem"
+                      className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm text-white/85 hover:bg-white/10 hover:text-white"
+                      disabled={creatingBoard}
+                      onClick={() => {
+                        setNewMenuOpen(false);
+                        void createBoard();
+                      }}
+                    >
+                      <LayoutGrid size={15} />
+                      Board
+                    </button>
+                    <button
+                      role="menuitem"
+                      className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm text-white/85 hover:bg-white/10 hover:text-white"
+                      disabled={creatingDoc}
+                      onClick={() => {
+                        setNewMenuOpen(false);
+                        void createDoc();
+                      }}
+                    >
+                      <FileText size={15} />
+                      Doc
+                    </button>
+                    <button
+                      role="menuitem"
+                      className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm text-white/85 hover:bg-white/10 hover:text-white"
+                      onClick={() => {
+                        setNewMenuOpen(false);
+                        void createFolder();
+                      }}
+                    >
+                      <Folder size={15} />
+                      Group
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
           <div className="space-y-1 overflow-y-auto">
@@ -1343,13 +1876,12 @@ export function BoardWorkspace({
               <SidebarRoot
                 entries={sidebarEntries}
                 boards={activeBoards}
-                activeBoardId={activeBoardId}
+                docs={visibleDocs}
+                activeBoardId={activeKind === "board" ? activeBoardId : ""}
+                activeDocId={activeKind === "doc" ? activeDocId : ""}
                 collapsedFolders={collapsedFolders}
-                onSelectBoard={(board) => {
-                  setActiveBoardId(board.id);
-                  setSidebarOpen(false);
-                  setBoardMenuOpen(false);
-                }}
+                onSelectBoard={selectBoard}
+                onSelectDoc={selectDoc}
                 onToggleFolder={(folder) =>
                   setCollapsedFolders((current) => {
                     const next = new Set(current);
@@ -1362,7 +1894,8 @@ export function BoardWorkspace({
                 onDeleteFolder={deleteFolder}
               />
             </DndContext>
-            {showArchived && archivedBoards.length > 0 && (
+            {showArchived &&
+              (archivedBoards.length > 0 || archivedDocs.length > 0) && (
               <div className="mt-4 border-t border-white/10 pt-3">
                 <p className="mb-2 px-3 text-[10px] font-semibold uppercase tracking-wider text-white/30">
                   Archived
@@ -1377,6 +1910,22 @@ export function BoardWorkspace({
                       className="rounded p-1 hover:bg-white/10 hover:text-white"
                       aria-label={`Restore ${board.name}`}
                       onClick={() => restoreBoard(board)}
+                    >
+                      <RotateCcw size={14} />
+                    </button>
+                  </div>
+                ))}
+                {archivedDocs.map((doc) => (
+                  <div
+                    key={doc.id}
+                    className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-white/45"
+                  >
+                    <FileText size={13} className="shrink-0" />
+                    <span className="min-w-0 flex-1 truncate">{doc.title}</span>
+                    <button
+                      className="rounded p-1 hover:bg-white/10 hover:text-white"
+                      aria-label={`Restore ${doc.title}`}
+                      onClick={() => restoreDoc(doc)}
                     >
                       <RotateCcw size={14} />
                     </button>
@@ -1420,15 +1969,41 @@ export function BoardWorkspace({
             />
             <input
               className="h-10 w-full rounded-xl border border-[#e4e3eb] bg-[#fafafd] pl-10 pr-4 text-sm outline-none focus:border-[#6c63ff]"
-              placeholder="Search items…"
+              placeholder="Search…"
               value={query}
               onChange={(event) => setQuery(event.target.value)}
             />
           </div>
         </header>
 
-        {!activeBoard ? (
-          <EmptyWorkspace onCreate={createBoard} loading={creatingBoard} />
+        {activeKind === "doc" && activeDoc ? (
+          <DocPane
+            doc={activeDoc}
+            folders={folders}
+            saveState={docSaveState}
+            focusTitle={focusTitle}
+            menuOpen={docMenuOpen}
+            menuRef={docMenuRef}
+            onToggleMenu={() => setDocMenuOpen((value) => !value)}
+            onTitleChange={(value) => {
+              const title = value.slice(0, 240);
+              updateDoc(activeDoc.id, { title: title.trim() ? title : "Untitled" });
+            }}
+            onContentChange={(content: JSONContent) =>
+              updateDoc(activeDoc.id, { content })
+            }
+            onMoveToFolder={(folderId) => moveDocToFolder(activeDoc, folderId)}
+            onChangeColor={(color) => updateDoc(activeDoc.id, { color })}
+            onArchive={() => archiveDoc(activeDoc)}
+            onDelete={() => deleteDoc(activeDoc)}
+          />
+        ) : !activeBoard ? (
+          <EmptyWorkspace
+            onCreateBoard={createBoard}
+            onCreateDoc={createDoc}
+            creatingBoard={creatingBoard}
+            creatingDoc={creatingDoc}
+          />
         ) : (
           <div className="mx-auto max-w-[1700px] px-4 py-6 md:px-8 md:py-8">
             <div className="mb-7 flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
@@ -1591,6 +2166,8 @@ export function BoardWorkspace({
                           onUpdateTitle={updateItemTitle}
                           onEditColumn={setEditingColumn}
                           onOpenItem={setActiveItem}
+                          onMoveItem={setMovingItem}
+                          onDeleteItem={deleteItem}
                           onKeyboardMove={moveItemByKeyboard}
                         />
                         <MobileCards
@@ -1606,6 +2183,8 @@ export function BoardWorkspace({
                           }
                           onAddItem={(event) => addItem(event, group)}
                           onOpenItem={setActiveItem}
+                          onMoveItem={setMovingItem}
+                          onDeleteItem={deleteItem}
                           onKeyboardMove={moveItemByKeyboard}
                         />
                       </>
@@ -1662,7 +2241,17 @@ export function BoardWorkspace({
           onClose={() => setActiveItem(null)}
           onUpdate={updateItemValue}
           onDelete={deleteItem}
+          onMove={() => setMovingItem(activeItem)}
           onUpdateTitle={updateItemTitle}
+        />
+      )}
+      {movingItem && (
+        <MoveItemModal
+          item={movingItem}
+          boards={activeBoards.filter((board) => board.id !== movingItem.board_id)}
+          groups={groups}
+          onClose={() => setMovingItem(null)}
+          onMove={(boardId, groupId) => moveItemToBoard(movingItem, boardId, groupId)}
         />
       )}
       {toast && (
@@ -1674,21 +2263,46 @@ export function BoardWorkspace({
   );
 }
 
+function folderChildren(folderId: string, boards: Board[], docs: Doc[]) {
+  return [
+    ...boards
+      .filter((board) => board.folder_id === folderId)
+      .map((board) => ({
+        type: "board" as const,
+        board,
+        position: board.position,
+      })),
+    ...docs
+      .filter((doc) => doc.folder_id === folderId)
+      .map((doc) => ({
+        type: "doc" as const,
+        doc,
+        position: doc.position,
+      })),
+  ].sort((a, b) => a.position - b.position);
+}
+
 function SidebarRoot({
   entries,
   boards,
+  docs,
   activeBoardId,
+  activeDocId,
   collapsedFolders,
   onSelectBoard,
+  onSelectDoc,
   onToggleFolder,
   onRenameFolder,
   onDeleteFolder,
 }: {
   entries: SidebarEntry[];
   boards: Board[];
+  docs: Doc[];
   activeBoardId: string;
+  activeDocId: string;
   collapsedFolders: Set<string>;
   onSelectBoard: (board: Board) => void;
+  onSelectDoc: (doc: Doc) => void;
   onToggleFolder: (folder: BoardFolder) => void;
   onRenameFolder: (folder: BoardFolder) => void;
   onDeleteFolder: (folder: BoardFolder) => void;
@@ -1713,15 +2327,21 @@ function SidebarRoot({
                 active={entry.board.id === activeBoardId}
                 onSelect={onSelectBoard}
               />
+            ) : entry.type === "doc" ? (
+              <SidebarDocRow
+                doc={entry.doc}
+                active={entry.doc.id === activeDocId}
+                onSelect={onSelectDoc}
+              />
             ) : (
               <SidebarFolderRow
                 folder={entry.folder}
-                boards={boards
-                  .filter((board) => board.folder_id === entry.folder.id)
-                  .sort((a, b) => a.position - b.position)}
+                items={folderChildren(entry.folder.id, boards, docs)}
                 activeBoardId={activeBoardId}
+                activeDocId={activeDocId}
                 collapsed={collapsedFolders.has(entry.folder.id)}
                 onSelectBoard={onSelectBoard}
+                onSelectDoc={onSelectDoc}
                 onToggle={onToggleFolder}
                 onRename={onRenameFolder}
                 onDelete={onDeleteFolder}
@@ -1780,21 +2400,58 @@ function SidebarBoardRow({
   );
 }
 
+function SidebarDocRow({
+  doc,
+  active,
+  onSelect,
+}: {
+  doc: Doc;
+  active: boolean;
+  onSelect: (doc: Doc) => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id: `sidebar-doc:${doc.id}` });
+  return (
+    <button
+      ref={setNodeRef}
+      {...attributes}
+      {...listeners}
+      style={{ transform: CSS.Transform.toString(transform), transition }}
+      onClick={() => onSelect(doc)}
+      className={`flex w-full select-none items-center gap-3 rounded-lg px-3 py-2 text-left text-sm transition ${
+        active
+          ? "bg-[#6c63ff] font-medium text-white"
+          : "text-white/65 hover:bg-white/[0.07] hover:text-white"
+      } ${isDragging ? "z-50 opacity-60 shadow-lg" : ""}`}
+    >
+      <FileText size={14} className="shrink-0" style={{ color: doc.color }} />
+      <span className="truncate">{doc.title}</span>
+    </button>
+  );
+}
+
 function SidebarFolderRow({
   folder,
-  boards,
+  items,
   activeBoardId,
+  activeDocId,
   collapsed,
   onSelectBoard,
+  onSelectDoc,
   onToggle,
   onRename,
   onDelete,
 }: {
   folder: BoardFolder;
-  boards: Board[];
+  items: Array<
+    | { type: "board"; board: Board; position: number }
+    | { type: "doc"; doc: Doc; position: number }
+  >;
   activeBoardId: string;
+  activeDocId: string;
   collapsed: boolean;
   onSelectBoard: (board: Board) => void;
+  onSelectDoc: (doc: Doc) => void;
   onToggle: (folder: BoardFolder) => void;
   onRename: (folder: BoardFolder) => void;
   onDelete: (folder: BoardFolder) => void;
@@ -1842,7 +2499,11 @@ function SidebarFolderRow({
       {!collapsed && (
         <SortableContext
           id={`sidebar-folder-items:${folder.id}`}
-          items={boards.map((board) => `sidebar-board:${board.id}`)}
+          items={items.map((item) =>
+            item.type === "board"
+              ? `sidebar-board:${item.board.id}`
+              : `sidebar-doc:${item.doc.id}`,
+          )}
           strategy={verticalListSortingStrategy}
         >
           <div
@@ -1851,17 +2512,26 @@ function SidebarFolderRow({
               isOver ? "border-[#918bff] bg-white/10" : "border-white/10"
             }`}
           >
-            {boards.map((board) => (
-              <SidebarBoardRow
-                key={board.id}
-                board={board}
-                active={board.id === activeBoardId}
-                onSelect={onSelectBoard}
-              />
-            ))}
-            {boards.length === 0 && (
+            {items.map((item) =>
+              item.type === "board" ? (
+                <SidebarBoardRow
+                  key={item.board.id}
+                  board={item.board}
+                  active={item.board.id === activeBoardId}
+                  onSelect={onSelectBoard}
+                />
+              ) : (
+                <SidebarDocRow
+                  key={item.doc.id}
+                  doc={item.doc}
+                  active={item.doc.id === activeDocId}
+                  onSelect={onSelectDoc}
+                />
+              ),
+            )}
+            {items.length === 0 && (
               <p className="px-3 py-1.5 text-[11px] text-white/25">
-                Drop a board here
+                Drop here
               </p>
             )}
           </div>
@@ -1872,11 +2542,15 @@ function SidebarFolderRow({
 }
 
 function EmptyWorkspace({
-  onCreate,
-  loading,
+  onCreateBoard,
+  onCreateDoc,
+  creatingBoard,
+  creatingDoc,
 }: {
-  onCreate: () => void;
-  loading: boolean;
+  onCreateBoard: () => void;
+  onCreateDoc: () => void;
+  creatingBoard: boolean;
+  creatingDoc: boolean;
 }) {
   return (
     <div className="grid min-h-[calc(100vh-4rem)] place-items-center p-6">
@@ -1885,15 +2559,24 @@ function EmptyWorkspace({
           <LayoutGrid size={30} />
         </span>
         <h1 className="mt-6 text-3xl font-semibold tracking-[-0.03em] text-[#242236]">
-          Create your first board
+          Start with a board or a doc
         </h1>
-        <button
-          className="mt-6 inline-flex h-11 items-center gap-2 rounded-xl bg-[#6c63ff] px-5 text-sm font-semibold text-white"
-          onClick={onCreate}
-          disabled={loading}
-        >
-          <Plus size={18} /> {loading ? "Creating…" : "Create a board"}
-        </button>
+        <div className="mt-6 flex flex-wrap justify-center gap-3">
+          <button
+            className="inline-flex h-11 items-center gap-2 rounded-xl bg-[#6c63ff] px-5 text-sm font-semibold text-white"
+            onClick={onCreateBoard}
+            disabled={creatingBoard}
+          >
+            <Plus size={18} /> {creatingBoard ? "Creating…" : "Create a board"}
+          </button>
+          <button
+            className="inline-flex h-11 items-center gap-2 rounded-xl border border-[#d8d6e3] bg-white px-5 text-sm font-semibold text-[#29283a]"
+            onClick={onCreateDoc}
+            disabled={creatingDoc}
+          >
+            <FileText size={18} /> {creatingDoc ? "Creating…" : "Create a doc"}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -2152,6 +2835,8 @@ type TableProps = {
   onUpdateTitle: (item: Item, title: string) => void;
   onEditColumn: (column: BoardColumn) => void;
   onOpenItem: (item: Item) => void;
+  onMoveItem: (item: Item) => void;
+  onDeleteItem: (item: Item) => void;
   onKeyboardMove: (item: Item, direction: -1 | 1) => void;
 };
 
@@ -2166,6 +2851,8 @@ function DesktopTable({
   onUpdateTitle,
   onEditColumn,
   onOpenItem,
+  onMoveItem,
+  onDeleteItem,
   onKeyboardMove,
 }: TableProps) {
   const { setNodeRef, isOver } = useDroppable({ id: `dgroup:${group.id}` });
@@ -2215,6 +2902,8 @@ function DesktopTable({
               onUpdateValue={onUpdateValue}
               onUpdateTitle={onUpdateTitle}
               onOpenItem={onOpenItem}
+              onMoveItem={onMoveItem}
+              onDeleteItem={onDeleteItem}
               onKeyboardMove={onKeyboardMove}
             />
           ))}
@@ -2249,6 +2938,8 @@ function SortableDesktopRow({
   onUpdateValue,
   onUpdateTitle,
   onOpenItem,
+  onMoveItem,
+  onDeleteItem,
   onKeyboardMove,
 }: Pick<
   TableProps,
@@ -2257,6 +2948,8 @@ function SortableDesktopRow({
   | "onUpdateValue"
   | "onUpdateTitle"
   | "onOpenItem"
+  | "onMoveItem"
+  | "onDeleteItem"
   | "onKeyboardMove"
 > & { item: Item }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
@@ -2309,13 +3002,12 @@ function SortableDesktopRow({
         </td>
       ))}
       <td className="px-2 text-center">
-        <button
-          className="rounded-md p-1.5 text-[#aaa8b4] hover:bg-[#efeff5] hover:text-[#555364]"
-          onClick={() => onOpenItem(item)}
-          aria-label={`Open ${item.title}`}
-        >
-          <MoreHorizontal size={17} />
-        </button>
+        <ItemActionsMenu
+          item={item}
+          onOpen={() => onOpenItem(item)}
+          onMove={() => onMoveItem(item)}
+          onDelete={() => onDeleteItem(item)}
+        />
       </td>
     </tr>
   );
@@ -2329,6 +3021,8 @@ function MobileCards({
   onNewTitle,
   onAddItem,
   onOpenItem,
+  onMoveItem,
+  onDeleteItem,
   onKeyboardMove,
 }: Omit<TableProps, "onUpdateTitle" | "onEditColumn" | "onUpdateValue">) {
   const { setNodeRef, isOver } = useDroppable({ id: `mgroup:${group.id}` });
@@ -2348,6 +3042,8 @@ function MobileCards({
             group={group}
             columns={columns}
             onOpenItem={onOpenItem}
+            onMoveItem={onMoveItem}
+            onDeleteItem={onDeleteItem}
             onKeyboardMove={onKeyboardMove}
           />
         ))}
@@ -2380,12 +3076,16 @@ function SortableMobileCard({
   group,
   columns,
   onOpenItem,
+  onMoveItem,
+  onDeleteItem,
   onKeyboardMove,
 }: {
   item: Item;
   group: Group;
   columns: BoardColumn[];
   onOpenItem: (item: Item) => void;
+  onMoveItem: (item: Item) => void;
+  onDeleteItem: (item: Item) => void;
   onKeyboardMove: (item: Item, direction: -1 | 1) => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
@@ -2431,13 +3131,12 @@ function SortableMobileCard({
         >
           {item.title}
         </button>
-        <button
-          className="rounded p-1 text-[#aaa8b4]"
-          onClick={() => onOpenItem(item)}
-          aria-label={`Open ${item.title}`}
-        >
-          <MoreHorizontal size={17} />
-        </button>
+        <ItemActionsMenu
+          item={item}
+          onOpen={() => onOpenItem(item)}
+          onMove={() => onMoveItem(item)}
+          onDelete={() => onDeleteItem(item)}
+        />
       </div>
       <div className="flex flex-wrap gap-2">
         {columns
@@ -2901,12 +3600,207 @@ function AutomationsModal({
   );
 }
 
+function ItemActionsMenu({
+  item,
+  onOpen,
+  onMove,
+  onDelete,
+}: {
+  item: Item;
+  onOpen: () => void;
+  onMove: () => void;
+  onDelete: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [coords, setCoords] = useState({ top: 0, right: 0 });
+
+  useEffect(() => {
+    if (!open) return;
+    function closeOnOutsidePress(event: PointerEvent) {
+      const target = event.target as Node;
+      if (
+        menuRef.current?.contains(target) ||
+        buttonRef.current?.contains(target)
+      ) {
+        return;
+      }
+      setOpen(false);
+    }
+    document.addEventListener("pointerdown", closeOnOutsidePress);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePress);
+  }, [open]);
+
+  function toggle() {
+    if (!open && buttonRef.current) {
+      const rect = buttonRef.current.getBoundingClientRect();
+      setCoords({
+        top: rect.bottom + 4,
+        right: window.innerWidth - rect.right,
+      });
+    }
+    setOpen((value) => !value);
+  }
+
+  return (
+    <>
+      <button
+        ref={buttonRef}
+        className="rounded-md p-1.5 text-[#aaa8b4] hover:bg-[#efeff5] hover:text-[#555364]"
+        onClick={toggle}
+        aria-expanded={open}
+        aria-haspopup="menu"
+        aria-label={`Actions for ${item.title}`}
+      >
+        <MoreHorizontal size={17} />
+      </button>
+      {open &&
+        createPortal(
+          <div
+            ref={menuRef}
+            role="menu"
+            className="fixed z-80 w-48 rounded-xl border border-[#e2e1e8] bg-white p-1.5 text-sm shadow-lg"
+            style={{ top: coords.top, right: coords.right }}
+          >
+            <button
+              role="menuitem"
+              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left hover:bg-[#f3f2f7]"
+              onClick={() => {
+                setOpen(false);
+                onOpen();
+              }}
+            >
+              <PanelRight size={15} /> Open
+            </button>
+            <button
+              role="menuitem"
+              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left hover:bg-[#f3f2f7]"
+              onClick={() => {
+                setOpen(false);
+                onMove();
+              }}
+            >
+              <ArrowRightLeft size={15} /> Move to board
+            </button>
+            <button
+              role="menuitem"
+              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-red-600 hover:bg-red-50"
+              onClick={() => {
+                setOpen(false);
+                onDelete();
+              }}
+            >
+              <Trash2 size={15} /> Delete
+            </button>
+          </div>,
+          document.body,
+        )}
+    </>
+  );
+}
+
+function MoveItemModal({
+  item,
+  boards,
+  groups,
+  onClose,
+  onMove,
+}: {
+  item: Item;
+  boards: Board[];
+  groups: Group[];
+  onClose: () => void;
+  onMove: (boardId: string, groupId: string) => void;
+}) {
+  const [boardId, setBoardId] = useState(boards[0]?.id ?? "");
+  const boardGroups = groups
+    .filter((group) => group.board_id === boardId)
+    .sort((a, b) => a.position - b.position);
+  const [groupId, setGroupId] = useState(boardGroups[0]?.id ?? "");
+  const selectedGroupId = boardGroups.some((group) => group.id === groupId)
+    ? groupId
+    : (boardGroups[0]?.id ?? "");
+
+  return (
+    <ModalShell onClose={onClose}>
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-xl font-semibold">Move to board</h2>
+          <p className="mt-1 text-sm text-[#858392]">
+            Send “{item.title}” to another board.
+          </p>
+        </div>
+        <button className="rounded-lg p-2 hover:bg-[#f2f2f6]" onClick={onClose}>
+          <X size={19} />
+        </button>
+      </div>
+      {boards.length === 0 ? (
+        <p className="mt-6 text-sm text-[#858392]">
+          Create another board to move this item.
+        </p>
+      ) : (
+        <>
+          <label className="mt-6 block text-sm font-medium">
+            Board
+            <select
+              className="mt-2 h-11 w-full rounded-xl border border-[#dedde6] bg-white px-3 text-sm outline-none focus:border-[#6c63ff]"
+              value={boardId}
+              onChange={(event) => {
+                const nextBoardId = event.target.value;
+                setBoardId(nextBoardId);
+                const nextGroup = groups
+                  .filter((group) => group.board_id === nextBoardId)
+                  .sort((a, b) => a.position - b.position)[0];
+                setGroupId(nextGroup?.id ?? "");
+              }}
+            >
+              {boards.map((board) => (
+                <option key={board.id} value={board.id}>
+                  {board.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="mt-4 block text-sm font-medium">
+            Group
+            <select
+              className="mt-2 h-11 w-full rounded-xl border border-[#dedde6] bg-white px-3 text-sm outline-none focus:border-[#6c63ff]"
+              value={selectedGroupId}
+              onChange={(event) => setGroupId(event.target.value)}
+              disabled={boardGroups.length === 0}
+            >
+              {boardGroups.length === 0 ? (
+                <option value="">No groups on this board</option>
+              ) : (
+                boardGroups.map((group) => (
+                  <option key={group.id} value={group.id}>
+                    {group.name}
+                  </option>
+                ))
+              )}
+            </select>
+          </label>
+          <button
+            className="mt-6 h-11 w-full rounded-xl bg-[#6c63ff] text-sm font-semibold text-white disabled:opacity-40"
+            disabled={!boardId || !selectedGroupId}
+            onClick={() => onMove(boardId, selectedGroupId)}
+          >
+            Move item
+          </button>
+        </>
+      )}
+    </ModalShell>
+  );
+}
+
 function ItemPanel({
   item,
   columns,
   onClose,
   onUpdate,
   onDelete,
+  onMove,
   onUpdateTitle,
 }: {
   item: Item;
@@ -2914,6 +3808,7 @@ function ItemPanel({
   onClose: () => void;
   onUpdate: CellProps["onUpdate"];
   onDelete: (item: Item) => void;
+  onMove: () => void;
   onUpdateTitle: (item: Item, title: string) => void;
 }) {
   return (
@@ -2959,12 +3854,20 @@ function ItemPanel({
             </div>
           ))}
         </div>
-        <button
-          className="mt-10 inline-flex items-center gap-2 rounded-lg px-2 py-2 text-sm text-red-600 hover:bg-red-50"
-          onClick={() => onDelete(item)}
-        >
-          <Trash2 size={16} /> Delete item
-        </button>
+        <div className="mt-10 flex flex-wrap gap-2">
+          <button
+            className="inline-flex items-center gap-2 rounded-lg px-2 py-2 text-sm text-[#555364] hover:bg-[#f3f2f7]"
+            onClick={onMove}
+          >
+            <ArrowRightLeft size={16} /> Move to board
+          </button>
+          <button
+            className="inline-flex items-center gap-2 rounded-lg px-2 py-2 text-sm text-red-600 hover:bg-red-50"
+            onClick={() => onDelete(item)}
+          >
+            <Trash2 size={16} /> Delete item
+          </button>
+        </div>
       </aside>
     </div>
   );
