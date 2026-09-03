@@ -73,6 +73,7 @@ export function DocEditor({ content, onChange }: Props) {
 
   useEffect(() => {
     if (!editor) return;
+    const current = editor;
 
     function onKeyDown(event: KeyboardEvent) {
       if (!(event.metaKey || event.ctrlKey) || event.defaultPrevented) return;
@@ -90,33 +91,33 @@ export function DocEditor({ content, onChange }: Props) {
       };
 
       if (event.code === "KeyB" && !event.shiftKey && !event.altKey) {
-        run(() => editor.chain().focus().toggleBold().run());
+        run(() => current.chain().focus().toggleBold().run());
         return;
       }
       if (event.code === "KeyI" && !event.shiftKey && !event.altKey) {
-        run(() => editor.chain().focus().toggleItalic().run());
+        run(() => current.chain().focus().toggleItalic().run());
         return;
       }
       if (event.code === "KeyU" && !event.shiftKey && !event.altKey) {
-        run(() => editor.chain().focus().toggleUnderline().run());
+        run(() => current.chain().focus().toggleUnderline().run());
         return;
       }
       if (event.code === "KeyS" && event.shiftKey && !event.altKey) {
-        run(() => editor.chain().focus().toggleStrike().run());
+        run(() => current.chain().focus().toggleStrike().run());
         return;
       }
       if (event.code === "KeyK" && !event.shiftKey && !event.altKey) {
         event.preventDefault();
-        editor.chain().focus().run();
+        current.chain().focus().run();
         setLink();
         return;
       }
       if (event.code === "Digit8" && event.shiftKey && !event.altKey) {
-        run(() => editor.chain().focus().toggleBulletList().run());
+        run(() => current.chain().focus().toggleBulletList().run());
         return;
       }
       if (event.code === "Digit7" && event.shiftKey && !event.altKey) {
-        run(() => editor.chain().focus().toggleOrderedList().run());
+        run(() => current.chain().focus().toggleOrderedList().run());
         return;
       }
     }
