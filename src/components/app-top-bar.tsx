@@ -6,7 +6,7 @@ import type { ReactNode } from "react";
 
 const TABS = [
   { href: "/board", label: "Tiistai" },
-  { href: "/putkiajo", label: "PutkiAjo" },
+  // { href: "/putkiajo", label: "PutkiAjo" },
 ];
 
 export function AppTopBar({
