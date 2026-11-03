@@ -52,6 +52,7 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { createClient } from "@/lib/supabase/client";
+import { AppTopBar } from "@/components/app-top-bar";
 import { DocPane } from "@/components/doc-pane";
 import {
   DOC_COLORS,
@@ -1955,26 +1956,30 @@ export function BoardWorkspace({
       </aside>
 
       <main className="min-w-0 flex-1">
-        <header className="flex h-16 items-center gap-3 border-b border-[#e5e5ec] bg-white px-4 md:px-7">
-          <button
-            className="rounded-lg p-2 text-[#6e6c7d] hover:bg-[#f2f2f7] md:hidden"
-            onClick={() => setSidebarOpen(true)}
-          >
-            <Menu size={21} />
-          </button>
-          <div className="relative ml-auto w-full max-w-90">
-            <Search
-              size={17}
-              className="absolute left-3 top-1/2 -translate-y-1/2 text-[#9997a5]"
-            />
-            <input
-              className="h-10 w-full rounded-xl border border-[#e4e3eb] bg-[#fafafd] pl-10 pr-4 text-sm outline-none focus:border-[#6c63ff]"
-              placeholder="Search…"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-            />
-          </div>
-        </header>
+        <AppTopBar
+          leading={
+            <button
+              className="rounded-lg p-2 text-[#6e6c7d] hover:bg-[#f2f2f7] md:hidden"
+              onClick={() => setSidebarOpen(true)}
+            >
+              <Menu size={21} />
+            </button>
+          }
+          search={
+            <>
+              <Search
+                size={17}
+                className="absolute left-3 top-1/2 -translate-y-1/2 text-[#9997a5]"
+              />
+              <input
+                className="h-10 w-full rounded-xl border border-[#e4e3eb] bg-[#fafafd] pl-10 pr-4 text-sm outline-none focus:border-[#6c63ff]"
+                placeholder="Search…"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+              />
+            </>
+          }
+        />
 
         {activeKind === "doc" && activeDoc ? (
           <DocPane
