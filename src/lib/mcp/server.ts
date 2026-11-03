@@ -1,11 +1,14 @@
 import { McpServer } from "@modelcontextprotocol/server";
-import { registerCrmTools } from "@/lib/mcp/crm-tools";
+import { registerTiistaiTools } from "@/lib/mcp/tiistai-tools";
 
-export function createCrmMcpServer(ownerId: string) {
+export function createTiistaiMcpServer(ownerId: string) {
   const server = new McpServer({
-    name: "tiistai-crm",
+    name: "tiistai",
     version: "1.0.0",
   });
-  registerCrmTools(server, ownerId);
+  registerTiistaiTools(server, ownerId);
   return server;
 }
+
+/** @deprecated use createTiistaiMcpServer */
+export const createCrmMcpServer = createTiistaiMcpServer;

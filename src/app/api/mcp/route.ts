@@ -4,7 +4,7 @@ import {
 } from "@modelcontextprotocol/server";
 import { mcpOwnerId, verifyMcpBearer } from "@/lib/mcp/auth";
 import { env, mcpConfig } from "@/lib/mcp/env";
-import { createCrmMcpServer } from "@/lib/mcp/server";
+import { createTiistaiMcpServer } from "@/lib/mcp/server";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -13,7 +13,7 @@ const handler = createMcpHandler(
   (ctx) => {
     const ownerId = ctx.authInfo ? mcpOwnerId(ctx.authInfo) : mcpConfig().ownerId;
     if (!ownerId) throw new Error("MCP_OWNER_ID is not configured");
-    return createCrmMcpServer(ownerId);
+    return createTiistaiMcpServer(ownerId);
   },
   { responseMode: "json" },
 );
