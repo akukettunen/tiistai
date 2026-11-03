@@ -3,6 +3,7 @@ import {
   originValidationResponse,
 } from "@modelcontextprotocol/server";
 import { mcpOwnerId, verifyMcpBearer } from "@/lib/mcp/auth";
+import { env, mcpConfig } from "@/lib/mcp/env";
 import { createCrmMcpServer } from "@/lib/mcp/server";
 
 export const runtime = "nodejs";
@@ -10,9 +11,7 @@ export const dynamic = "force-dynamic";
 
 const handler = createMcpHandler(
   (ctx) => {
-    const ownerId = ctx.authInfo
-      ? mcpOwnerId(ctx.authInfo)
-      : process.env.MCP_OWNER_ID?.trim();
+    const ownerId = ctx.authInfo ? mcpOwnerId(ctx.authInfo) : mcpConfig().ownerId;
     if (!ownerId) throw new Error("MCP_OWNER_ID is not configured");
     return createCrmMcpServer(ownerId);
   },
@@ -20,7 +19,7 @@ const handler = createMcpHandler(
 );
 
 function allowedOrigins() {
-  const raw = process.env.MCP_ALLOWED_ORIGINS?.trim();
+  const raw = env("MCP_ALLOWED_ORIGINS");
   if (!raw) return [];
   return raw
     .split(",")
@@ -29,18 +28,49 @@ function allowedOrigins() {
 }
 
 async function handle(request: Request): Promise<Response> {
+  // GET without MCP Accept headers → config probe (no secrets).
+  if (request.method === "GET") {
+    const accept = request.headers.get("accept") ?? "";
+    if (!accept.includes("text/event-stream") && !accept.includes("application/json")) {
+      const cfg = mcpConfig();
+      return Response.json({
+        ok: Boolean(cfg.token && cfg.ownerId && cfg.supabaseSecret),
+        has: {
+          MCP_TOKEN: Boolean(cfg.token),
+          MCP_OWNER_ID: Boolean(cfg.ownerId),
+          SUPABASE_SECRET_KEY: Boolean(cfg.supabaseSecret),
+          NEXT_PUBLIC_SUPABASE_URL: Boolean(cfg.supabaseUrl),
+        },
+      });
+    }
+  }
+
   const origins = allowedOrigins();
   if (origins.length) {
     const rejected = originValidationResponse(request, origins);
     if (rejected) return rejected;
   }
 
+  const cfg = mcpConfig();
+  const configured = Boolean(cfg.token && cfg.ownerId);
   const authInfo = verifyMcpBearer(request);
   if (!authInfo) {
-    // Missing MCP_TOKEN / MCP_OWNER_ID disables the endpoint instead of failing open.
-    const configured = Boolean(process.env.MCP_TOKEN?.trim() && process.env.MCP_OWNER_ID?.trim());
     if (!configured) {
-      return new Response("Not Found", { status: 404 });
+      return Response.json(
+        {
+          error: {
+            code: "MCP_NOT_CONFIGURED",
+            message:
+              "MCP env missing at runtime. Set MCP_TOKEN and MCP_OWNER_ID in Amplify, then redeploy.",
+            has: {
+              MCP_TOKEN: Boolean(cfg.token),
+              MCP_OWNER_ID: Boolean(cfg.ownerId),
+              SUPABASE_SECRET_KEY: Boolean(cfg.supabaseSecret),
+            },
+          },
+        },
+        { status: 503 },
+      );
     }
     return Response.json(
       { error: { code: "UNAUTHORIZED", message: "Invalid or missing bearer token" } },
