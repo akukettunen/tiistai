@@ -60,6 +60,13 @@ import {
   type Doc,
 } from "@/lib/docs";
 import type { JSONContent } from "@tiptap/react";
+import {
+  todayIso,
+  weekStart,
+  type ColumnRole,
+  type ColumnSettings as PlanningColumnSettings,
+  type OptionState,
+} from "@/lib/planning";
 
 type Board = {
   id: string;
@@ -108,8 +115,7 @@ type Group = {
   position: number;
 };
 
-type LabelOption = { id: string; label: string; color: string };
-type ColumnSettings = { options?: LabelOption[] };
+type ColumnSettings = PlanningColumnSettings;
 
 type BoardColumn = {
   id: string;
@@ -130,6 +136,9 @@ type Item = {
   description: string;
   column_values: Record<string, string | boolean | null>;
   position: number;
+  planned_week: string | null;
+  planned_day: string | null;
+  completed_at: string | null;
 };
 
 type Automation = {
@@ -152,6 +161,7 @@ type Props = {
   initialItems: Item[];
   initialAutomations: Automation[];
   initialError: string | null;
+  initialBoardId?: string;
 };
 
 const COLORS = [
@@ -248,11 +258,12 @@ const DEFAULT_COLUMNS: Array<Omit<BoardColumn, "id" | "board_id" | "owner_id">> 
     type: "label",
     position: 0,
     settings: {
+      role: "status",
       options: [
         { id: "todo", label: "To do", color: "#c4c4c4" },
-        { id: "working", label: "Working on it", color: "#fdab3d" },
+        { id: "working", label: "Working on it", color: "#fdab3d", state: "in_progress" },
         { id: "stuck", label: "Stuck", color: "#e2445c" },
-        { id: "done", label: "Done", color: "#00c875" },
+        { id: "done", label: "Done", color: "#00c875", state: "done" },
       ],
     },
   },
@@ -261,6 +272,7 @@ const DEFAULT_COLUMNS: Array<Omit<BoardColumn, "id" | "board_id" | "owner_id">> 
     type: "label",
     position: 1,
     settings: {
+      role: "severity",
       options: [
         { id: "low", label: "Low", color: "#579bfc" },
         { id: "medium", label: "Medium", color: "#fdab3d" },
@@ -282,7 +294,7 @@ const DEFAULT_COLUMNS: Array<Omit<BoardColumn, "id" | "board_id" | "owner_id">> 
       ],
     },
   },
-  { title: "Due date", type: "date", position: 3, settings: {} },
+  { title: "Due date", type: "date", position: 3, settings: { role: "due_date" } },
   { title: "Notes", type: "long_text", position: 4, settings: {} },
 ];
 
@@ -299,11 +311,19 @@ function remapColumnValues(
   for (const source of sourceColumns) {
     const value = values[source.id];
     if (value === undefined || value === null || value === "") continue;
-    const target = targetColumns.find(
-      (column) =>
-        column.type === source.type &&
-        column.title.toLowerCase() === source.title.toLowerCase(),
-    );
+    const target =
+      (source.settings.role
+        ? targetColumns.find(
+            (column) =>
+              column.type === source.type &&
+              column.settings.role === source.settings.role,
+          )
+        : undefined) ??
+      targetColumns.find(
+        (column) =>
+          column.type === source.type &&
+          column.title.toLowerCase() === source.title.toLowerCase(),
+      );
     if (!target) continue;
     if (source.type === "label" && typeof value === "string") {
       const sourceOption = source.settings.options?.find((option) => option.id === value);
@@ -313,7 +333,12 @@ function remapColumnValues(
           ? target.settings.options?.find(
               (option) =>
                 option.label.toLowerCase() === sourceOption.label.toLowerCase(),
-            )
+            ) ??
+            (sourceOption.state
+              ? target.settings.options?.find(
+                  (option) => option.state === sourceOption.state,
+                )
+              : undefined)
           : undefined);
       if (targetOption) next[target.id] = targetOption.id;
       continue;
@@ -333,6 +358,7 @@ export function BoardWorkspace({
   initialItems,
   initialAutomations,
   initialError,
+  initialBoardId,
 }: Props) {
   const router = useRouter();
   const supabase = useMemo(() => createClient(), []);
@@ -347,7 +373,9 @@ export function BoardWorkspace({
     initialBoards.some((board) => !board.archived_at) ? "board" : "doc",
   );
   const [activeBoardId, setActiveBoardId] = useState(
-    initialBoards.find((board) => !board.archived_at)?.id ?? "",
+    initialBoards.find((board) => board.id === initialBoardId && !board.archived_at)?.id ??
+      initialBoards.find((board) => !board.archived_at)?.id ??
+      "",
   );
   const [activeDocId, setActiveDocId] = useState(
     initialDocs.find((doc) => !doc.archived_at)?.id ?? "",
@@ -1321,14 +1349,17 @@ export function BoardWorkspace({
     setActiveItem((current) =>
       current?.id === item.id ? { ...current, column_values: nextValues } : current,
     );
-    const { error } = await supabase
+    const { data, error } = await supabase
       .from("items")
       .update({ column_values: nextValues, updated_at: new Date().toISOString() })
-      .eq("id", item.id);
+      .eq("id", item.id)
+      .select()
+      .single();
     if (error) {
       notify(error.message);
       return;
     }
+    applyItemRow(data as Item);
 
     const matchingAutomation = automations.find(
       (automation) =>
@@ -1340,6 +1371,64 @@ export function BoardWorkspace({
     if (matchingAutomation) {
       await moveItemForAutomation(item, matchingAutomation.target_group_id);
     }
+  }
+
+  // Sync local state with the row the DB returned (trigger-maintained
+  // completed_at / planned_week). Keeps the local group/position, which
+  // may have been changed optimistically by a concurrent move.
+  function applyItemRow(row: Item) {
+    const merge = (entry: Item) => ({
+      ...entry,
+      column_values: row.column_values,
+      planned_week: row.planned_week,
+      planned_day: row.planned_day,
+      completed_at: row.completed_at,
+    });
+    setItems((current) =>
+      current.map((entry) => (entry.id === row.id ? merge(entry) : entry)),
+    );
+    setActiveItem((current) => (current?.id === row.id ? merge(current) : current));
+  }
+
+  async function planItem(item: Item, plan: "week" | "day" | "clear") {
+    const today = todayIso();
+    const patch =
+      plan === "day"
+        ? { planned_day: today, planned_week: weekStart(today) }
+        : plan === "week"
+          ? { planned_week: weekStart(today) }
+          : { planned_day: null, planned_week: null };
+    // Planning for this week keeps a planned day only if it is in this week.
+    if (plan === "week" && item.planned_day && weekStart(item.planned_day) !== weekStart(today)) {
+      Object.assign(patch, { planned_day: null });
+    }
+    setItems((current) =>
+      current.map((entry) => (entry.id === item.id ? { ...entry, ...patch } : entry)),
+    );
+    setActiveItem((current) =>
+      current?.id === item.id ? { ...current, ...patch } : current,
+    );
+    const { data, error } = await supabase
+      .from("items")
+      .update({ ...patch, updated_at: new Date().toISOString() })
+      .eq("id", item.id)
+      .select()
+      .single();
+    if (error) {
+      notify(error.message);
+      setItems((current) =>
+        current.map((entry) => (entry.id === item.id ? item : entry)),
+      );
+      return;
+    }
+    applyItemRow(data as Item);
+    notify(
+      plan === "day"
+        ? "Suunniteltu tälle päivälle"
+        : plan === "week"
+          ? "Suunniteltu tälle viikolle"
+          : "Poistettu suunnitelmasta",
+    );
   }
 
   async function moveItemForAutomation(item: Item, targetGroupId: string) {
@@ -1480,7 +1569,7 @@ export function BoardWorkspace({
     );
     setActiveItem(null);
     setMovingItem(null);
-    const { error } = await supabase
+    const { data, error } = await supabase
       .from("items")
       .update({
         board_id: boardId,
@@ -1489,7 +1578,10 @@ export function BoardWorkspace({
         position,
         updated_at: new Date().toISOString(),
       })
-      .eq("id", item.id);
+      .eq("id", item.id)
+      .select()
+      .single();
+    if (!error) applyItemRow(data as Item);
     if (error) {
       notify(error.message);
       setItems((current) =>
@@ -1501,17 +1593,38 @@ export function BoardWorkspace({
   }
 
   async function saveColumn(column: BoardColumn) {
-    const { error } = await supabase
-      .from("board_columns")
-      .update({
-        title: column.title,
-        settings: column.settings,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", column.id);
+    const role = column.settings.role;
+    // At most one column per role per board: clear the role from the others.
+    const conflicting = role
+      ? columns.filter(
+          (entry) =>
+            entry.board_id === column.board_id &&
+            entry.id !== column.id &&
+            entry.settings.role === role,
+        )
+      : [];
+    const cleared = conflicting.map((entry) => {
+      const settings = { ...entry.settings };
+      delete settings.role;
+      return { ...entry, settings };
+    });
+    const results = await Promise.all(
+      [column, ...cleared].map((entry) =>
+        supabase
+          .from("board_columns")
+          .update({
+            ...(entry.id === column.id ? { title: column.title } : {}),
+            settings: entry.settings,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", entry.id),
+      ),
+    );
+    const error = results.find((result) => result.error)?.error;
     if (error) return notify(error.message);
+    const updated = new Map([column, ...cleared].map((entry) => [entry.id, entry]));
     setColumns((current) =>
-      current.map((entry) => (entry.id === column.id ? column : entry)),
+      current.map((entry) => updated.get(entry.id) ?? entry),
     );
     setEditingColumn(null);
   }
@@ -2174,6 +2287,7 @@ export function BoardWorkspace({
                           onMoveItem={setMovingItem}
                           onDeleteItem={deleteItem}
                           onKeyboardMove={moveItemByKeyboard}
+                          onPlanItem={planItem}
                         />
                         <MobileCards
                           columns={activeColumns}
@@ -2191,6 +2305,7 @@ export function BoardWorkspace({
                           onMoveItem={setMovingItem}
                           onDeleteItem={deleteItem}
                           onKeyboardMove={moveItemByKeyboard}
+                          onPlanItem={planItem}
                         />
                       </>
                     )}
@@ -2843,7 +2958,62 @@ type TableProps = {
   onMoveItem: (item: Item) => void;
   onDeleteItem: (item: Item) => void;
   onKeyboardMove: (item: Item, direction: -1 | 1) => void;
+  onPlanItem: (item: Item, plan: PlanAction) => void;
 };
+
+type PlanAction = "week" | "day" | "clear";
+
+const WEEKDAY_NAMES = ["su", "ma", "ti", "ke", "to", "pe", "la"];
+
+/** Short badge text for a planned item, or null when not planned. */
+function planBadge(item: Pick<Item, "planned_day" | "planned_week">) {
+  const today = todayIso();
+  if (item.planned_day) {
+    if (item.planned_day === today) return "Tänään";
+    if (weekStart(item.planned_day) === weekStart(today)) {
+      const [y, m, d] = item.planned_day.split("-").map(Number);
+      const name = WEEKDAY_NAMES[new Date(Date.UTC(y, m - 1, d)).getUTCDay()];
+      return name.charAt(0).toUpperCase() + name.slice(1);
+    }
+    const [, m, d] = item.planned_day.split("-").map(Number);
+    return `${d}.${m}.`;
+  }
+  if (item.planned_week) {
+    if (item.planned_week === weekStart(today)) return "Tämä viikko";
+    const [, m, d] = item.planned_week.split("-").map(Number);
+    return `Vko ${d}.${m}.`;
+  }
+  return null;
+}
+
+function PlanBadge({ item }: { item: Item }) {
+  const text = planBadge(item);
+  if (!text) return null;
+  return (
+    <span className="shrink-0 rounded-md bg-[#f1efff] px-1.5 py-0.5 text-[10px] font-semibold text-[#5148da]">
+      {text}
+    </span>
+  );
+}
+
+/**
+ * Row shortcuts: w = this week, t = today, u = unplan. Ignored while typing
+ * in inputs/selects/editors or with modifier keys.
+ */
+function handlePlanShortcut(
+  event: React.KeyboardEvent,
+  item: Item,
+  onPlanItem: (item: Item, plan: PlanAction) => void,
+) {
+  if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+  const target = event.target as HTMLElement;
+  if (target.closest("input,textarea,select,[contenteditable='true']")) return;
+  const plan: PlanAction | null =
+    event.key === "w" ? "week" : event.key === "t" ? "day" : event.key === "u" ? "clear" : null;
+  if (!plan) return;
+  event.preventDefault();
+  onPlanItem(item, plan);
+}
 
 function DesktopTable({
   group,
@@ -2859,6 +3029,7 @@ function DesktopTable({
   onMoveItem,
   onDeleteItem,
   onKeyboardMove,
+  onPlanItem,
 }: TableProps) {
   const { setNodeRef, isOver } = useDroppable({ id: `dgroup:${group.id}` });
   return (
@@ -2910,6 +3081,7 @@ function DesktopTable({
               onMoveItem={onMoveItem}
               onDeleteItem={onDeleteItem}
               onKeyboardMove={onKeyboardMove}
+              onPlanItem={onPlanItem}
             />
           ))}
           <tr className="h-11 border-t border-[#e6e5eb]">
@@ -2946,6 +3118,7 @@ function SortableDesktopRow({
   onMoveItem,
   onDeleteItem,
   onKeyboardMove,
+  onPlanItem,
 }: Pick<
   TableProps,
   | "group"
@@ -2956,6 +3129,7 @@ function SortableDesktopRow({
   | "onMoveItem"
   | "onDeleteItem"
   | "onKeyboardMove"
+  | "onPlanItem"
 > & { item: Item }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: `d:${item.id}` });
@@ -2966,6 +3140,7 @@ function SortableDesktopRow({
         if ((event.target as HTMLElement).closest("button,input,select,textarea")) return;
         listeners?.onPointerDown?.(event);
       }}
+      onKeyDown={(event) => handlePlanShortcut(event, item, onPlanItem)}
       style={{ transform: CSS.Transform.toString(transform), transition }}
       className={`h-11 border-t border-[#e6e5eb] hover:bg-[#fafaff] ${
         isDragging ? "relative z-30 opacity-60 shadow-lg" : ""
@@ -2999,6 +3174,7 @@ function SortableDesktopRow({
             defaultValue={item.title}
             onBlur={(event) => onUpdateTitle(item, event.target.value)}
           />
+          <PlanBadge item={item} />
         </div>
       </td>
       {columns.map((column) => (
@@ -3012,6 +3188,7 @@ function SortableDesktopRow({
           onOpen={() => onOpenItem(item)}
           onMove={() => onMoveItem(item)}
           onDelete={() => onDeleteItem(item)}
+          onPlan={(plan) => onPlanItem(item, plan)}
         />
       </td>
     </tr>
@@ -3029,6 +3206,7 @@ function MobileCards({
   onMoveItem,
   onDeleteItem,
   onKeyboardMove,
+  onPlanItem,
 }: Omit<TableProps, "onUpdateTitle" | "onEditColumn" | "onUpdateValue">) {
   const { setNodeRef, isOver } = useDroppable({ id: `mgroup:${group.id}` });
   return (
@@ -3050,6 +3228,7 @@ function MobileCards({
             onMoveItem={onMoveItem}
             onDeleteItem={onDeleteItem}
             onKeyboardMove={onKeyboardMove}
+            onPlanItem={onPlanItem}
           />
         ))}
         <form
@@ -3084,6 +3263,7 @@ function SortableMobileCard({
   onMoveItem,
   onDeleteItem,
   onKeyboardMove,
+  onPlanItem,
 }: {
   item: Item;
   group: Group;
@@ -3092,6 +3272,7 @@ function SortableMobileCard({
   onMoveItem: (item: Item) => void;
   onDeleteItem: (item: Item) => void;
   onKeyboardMove: (item: Item, direction: -1 | 1) => void;
+  onPlanItem: (item: Item, plan: PlanAction) => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: `m:${item.id}` });
@@ -3102,6 +3283,7 @@ function SortableMobileCard({
         if ((event.target as HTMLElement).closest("button,input,select,textarea")) return;
         listeners?.onPointerDown?.(event);
       }}
+      onKeyDown={(event) => handlePlanShortcut(event, item, onPlanItem)}
       className={`w-full rounded-xl border border-[#e3e2e9] bg-white p-4 shadow-sm ${
         isDragging ? "z-30 opacity-60 shadow-lg" : ""
       }`}
@@ -3141,9 +3323,11 @@ function SortableMobileCard({
           onOpen={() => onOpenItem(item)}
           onMove={() => onMoveItem(item)}
           onDelete={() => onDeleteItem(item)}
+          onPlan={(plan) => onPlanItem(item, plan)}
         />
       </div>
       <div className="flex flex-wrap gap-2">
+        <PlanBadge item={item} />
         {columns
           .filter((column) => column.type === "label")
           .map((column) => {
@@ -3263,6 +3447,19 @@ function ColumnEditor({
 }) {
   const [draft, setDraft] = useState(column);
   const options = draft.settings.options ?? [];
+  const roleChoices: Array<[ColumnRole | "", string]> =
+    draft.type === "label"
+      ? [
+          ["", "Ei roolia"],
+          ["status", "Status"],
+          ["severity", "Severity"],
+        ]
+      : draft.type === "date"
+        ? [
+            ["", "Ei roolia"],
+            ["due_date", "Due date"],
+          ]
+        : [];
   return (
     <ModalShell onClose={onClose}>
       <div className="flex items-center justify-between">
@@ -3284,6 +3481,30 @@ function ColumnEditor({
           onChange={(event) => setDraft({ ...draft, title: event.target.value })}
         />
       </label>
+      {roleChoices.length > 0 && (
+        <label className="mt-5 block text-sm font-medium">
+          Rooli
+          <select
+            className="mt-2 h-11 w-full rounded-xl border border-[#dedde6] bg-white px-3 outline-none focus:border-[#6c63ff]"
+            value={draft.settings.role ?? ""}
+            onChange={(event) => {
+              const settings = { ...draft.settings };
+              if (event.target.value) settings.role = event.target.value as ColumnRole;
+              else delete settings.role;
+              setDraft({ ...draft, settings });
+            }}
+          >
+            {roleChoices.map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+          <span className="mt-1 block text-xs font-normal text-[#858392]">
+            Yksi sarake per rooli taulua kohden; muilta sarakkeilta rooli poistetaan.
+          </span>
+        </label>
+      )}
       {draft.type === "label" && (
         <div className="mt-5">
           <p className="mb-2 text-sm font-medium">Label options</p>
@@ -3298,7 +3519,7 @@ function ColumnEditor({
                   onChange={(event) => {
                     const next = [...options];
                     next[index] = { ...option, color: event.target.value };
-                    setDraft({ ...draft, settings: { options: next } });
+                    setDraft({ ...draft, settings: { ...draft.settings, options: next } });
                   }}
                 />
                 <input
@@ -3307,15 +3528,35 @@ function ColumnEditor({
                   onChange={(event) => {
                     const next = [...options];
                     next[index] = { ...option, label: event.target.value };
-                    setDraft({ ...draft, settings: { options: next } });
+                    setDraft({ ...draft, settings: { ...draft.settings, options: next } });
                   }}
                 />
+                <select
+                  aria-label={`${option.label} state`}
+                  className="h-10 rounded-lg border border-[#e1e0e8] bg-white px-2 text-xs text-[#636171] outline-none focus:border-[#6c63ff]"
+                  value={option.state ?? ""}
+                  onChange={(event) => {
+                    const next = [...options];
+                    const updated = { ...option };
+                    if (event.target.value) updated.state = event.target.value as OptionState;
+                    else delete updated.state;
+                    next[index] = updated;
+                    setDraft({ ...draft, settings: { ...draft.settings, options: next } });
+                  }}
+                >
+                  <option value="">—</option>
+                  <option value="in_progress">Työn alla</option>
+                  <option value="done">Valmis</option>
+                </select>
                 <button
                   className="rounded-lg p-2 text-[#aaa8b4] hover:bg-red-50 hover:text-red-600"
                   onClick={() =>
                     setDraft({
                       ...draft,
-                      settings: { options: options.filter((_, itemIndex) => itemIndex !== index) },
+                      settings: {
+                        ...draft.settings,
+                        options: options.filter((_, itemIndex) => itemIndex !== index),
+                      },
                     })
                   }
                 >
@@ -3330,6 +3571,7 @@ function ColumnEditor({
               setDraft({
                 ...draft,
                 settings: {
+                  ...draft.settings,
                   options: [
                     ...options,
                     {
@@ -3610,11 +3852,13 @@ function ItemActionsMenu({
   onOpen,
   onMove,
   onDelete,
+  onPlan,
 }: {
   item: Item;
   onOpen: () => void;
   onMove: () => void;
   onDelete: () => void;
+  onPlan: (plan: PlanAction) => void;
 }) {
   const [open, setOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -3665,7 +3909,7 @@ function ItemActionsMenu({
           <div
             ref={menuRef}
             role="menu"
-            className="fixed z-80 w-48 rounded-xl border border-[#e2e1e8] bg-white p-1.5 text-sm shadow-lg"
+            className="fixed z-80 w-56 rounded-xl border border-[#e2e1e8] bg-white p-1.5 text-sm shadow-lg"
             style={{ top: coords.top, right: coords.right }}
           >
             <button
@@ -3688,6 +3932,31 @@ function ItemActionsMenu({
             >
               <ArrowRightLeft size={15} /> Move to board
             </button>
+            <div className="my-1 border-t border-[#eeeef2]" />
+            {(
+              [
+                ["week", "Tälle viikolle", "W"],
+                ["day", "Tälle päivälle", "T"],
+                ...(item.planned_day || item.planned_week
+                  ? ([["clear", "Poista suunnitelmasta", "U"]] as const)
+                  : []),
+              ] as const
+            ).map(([plan, label, key]) => (
+              <button
+                key={plan}
+                role="menuitem"
+                className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left hover:bg-[#f3f2f7]"
+                onClick={() => {
+                  setOpen(false);
+                  onPlan(plan);
+                }}
+              >
+                {plan === "clear" ? <X size={15} /> : <CalendarDays size={15} />}
+                <span className="flex-1">{label}</span>
+                <kbd className="text-[10px] text-[#aaa8b4]">{key}</kbd>
+              </button>
+            ))}
+            <div className="my-1 border-t border-[#eeeef2]" />
             <button
               role="menuitem"
               className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-red-600 hover:bg-red-50"

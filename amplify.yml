@@ -8,7 +8,7 @@ frontend:
       commands:
         # Amplify console env vars are build-only unless copied into .env.production
         # for Next.js SSR / API routes (see Amplify SSR env docs).
-        - env | grep -e '^MCP_TOKEN=' -e '^MCP_OWNER_ID=' -e '^SUPABASE_SECRET_KEY=' -e '^MAIL_ENCRYPTION_KEY=' -e '^NEXT_PUBLIC_' >> .env.production || true
+        - env | grep -e '^MCP_TOKEN=' -e '^MCP_OWNER_ID=' -e '^SUPABASE_SECRET_KEY=' -e '^MAIL_ENCRYPTION_KEY=' -e '^GOOGLE_CLIENT_ID=' -e '^GOOGLE_CLIENT_SECRET=' -e '^GOOGLE_OAUTH_REDIRECT_URL=' -e '^CALENDAR_WEBHOOK_URL=' -e '^CRON_SECRET=' -e '^NEXT_PUBLIC_' >> .env.production || true
         - npm run build
   artifacts:
     baseDirectory: .next

@@ -1,22 +1,36 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
-import { createAdminClient } from "@/lib/supabase/admin";
 import { fail, ok, throwDb } from "@/lib/mcp/result";
+import {
+  ITEM_FIELDS,
+  applyItemFields,
+  db,
+  describeItem,
+  fetchAll,
+  isoDate,
+  loadContext,
+  owned,
+  severityMatches,
+  statusMatches,
+  uuid,
+  type ItemRow,
+} from "@/lib/mcp/common";
+import { registerPlanningTools } from "@/lib/mcp/planning-tools";
+import { weekStart } from "@/lib/planning";
 
-const uuid = z.string().uuid();
-const itemStatus = z.enum(["todo", "working", "stuck", "done"]);
-const itemPriority = z.enum(["low", "medium", "high", "critical"]);
-
-function db() {
-  return createAdminClient();
-}
-
-async function owned<T = Record<string, unknown>>(ownerId: string, table: string, id: string): Promise<T> {
-  const { data, error } = await db().from(table).select("*").eq("id", id).eq("owner_id", ownerId).maybeSingle();
-  throwDb(error);
-  if (!data) throw new Error(`${table} not found: ${id}`);
-  return data as T;
-}
+const statusInput = z
+  .string()
+  .min(1)
+  .max(80)
+  .describe('Status option id (todo/working/stuck/done), label (e.g. "Working on it"), or state keyword "done" / "in_progress"');
+const priorityInput = z
+  .string()
+  .min(1)
+  .max(80)
+  .describe("Severity option id or label (low/medium/high/critical)");
+const dueDateInput = isoDate.nullable().describe("Due date YYYY-MM-DD (null clears)");
+const plannedDayInput = isoDate.nullable().describe("Helsinki date the item is planned for; also sets planned_week");
+const plannedWeekInput = isoDate.nullable().describe("Week the item is planned for (any date; normalised to its Monday)");
 
 export function registerTiistaiTools(server: McpServer, ownerId: string) {
   server.registerTool(
@@ -85,34 +99,56 @@ export function registerTiistaiTools(server: McpServer, ownerId: string) {
     "search_items",
     {
       title: "Search items",
-      description: "Search Tiistai board items by title, board, group, status, or priority.",
+      description:
+        "Search board items by title, board, group, status, severity, or planning week/day (Helsinki dates). Status and severity are matched per board against its Status / Severity column options (id, label, or \"done\" / \"in_progress\").",
       inputSchema: z
         .object({
           query: z.string().default("").describe("Title substring"),
           board_id: uuid.optional(),
           group_id: uuid.optional(),
-          status: itemStatus.optional(),
-          priority: itemPriority.optional(),
+          status: statusInput.optional(),
+          priority: priorityInput.optional(),
+          planned_week: isoDate.optional().describe("Any date in the week (normalised to Monday)"),
+          planned_day: isoDate.optional(),
+          include_archived_boards: z.boolean().default(false),
           limit: z.number().int().min(1).max(200).default(50),
         })
         .strict(),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async (input) => {
-      let q = db()
-        .from("items")
-        .select("*")
-        .eq("owner_id", ownerId)
-        .order("updated_at", { ascending: false })
-        .limit(input.limit);
-      if (input.board_id) q = q.eq("board_id", input.board_id);
-      if (input.group_id) q = q.eq("group_id", input.group_id);
-      if (input.status) q = q.eq("status", input.status);
-      if (input.priority) q = q.eq("priority", input.priority);
-      if (input.query.trim()) q = q.ilike("title", `%${input.query.trim()}%`);
-      const { data, error } = await q;
-      throwDb(error);
-      return ok(data ?? []);
+      const ctx = await loadContext(ownerId);
+      const filterInTs = Boolean(input.status || input.priority || !input.include_archived_boards);
+      const build = () => {
+        let q = db()
+          .from("items")
+          .select(ITEM_FIELDS)
+          .eq("owner_id", ownerId)
+          .order("updated_at", { ascending: false });
+        if (input.board_id) q = q.eq("board_id", input.board_id);
+        if (input.group_id) q = q.eq("group_id", input.group_id);
+        if (input.planned_week) q = q.eq("planned_week", weekStart(input.planned_week));
+        if (input.planned_day) q = q.eq("planned_day", input.planned_day);
+        if (input.query.trim()) q = q.ilike("title", `%${input.query.trim()}%`);
+        return q;
+      };
+      const rows = filterInTs
+        ? await fetchAll<ItemRow>((from, to) => build().range(from, to) as never)
+        : await (async () => {
+            const { data, error } = await build().limit(input.limit);
+            throwDb(error);
+            return (data ?? []) as unknown as ItemRow[];
+          })();
+      const matches = rows.filter((item) => {
+        if (!input.include_archived_boards && ctx.boards.get(item.board_id)?.archived_at) return false;
+        if (input.status && !statusMatches(item, ctx.columns, input.status)) return false;
+        if (input.priority && !severityMatches(item, ctx.columns, input.priority)) return false;
+        return true;
+      });
+      return ok({
+        total: matches.length,
+        items: matches.slice(0, input.limit).map((item) => describeItem(item, ctx)),
+      });
     },
   );
 
@@ -120,28 +156,38 @@ export function registerTiistaiTools(server: McpServer, ownerId: string) {
     "get_item",
     {
       title: "Get item",
-      description: "Fetch one board item by id.",
+      description: "Fetch one board item by id, with resolved status, severity, due date and planning fields.",
       inputSchema: z.object({ id: uuid }).strict(),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async ({ id }) => ok(await owned(ownerId, "items", id)),
+    async ({ id }) => {
+      const [item, ctx] = await Promise.all([owned<ItemRow>(ownerId, "items", id), loadContext(ownerId)]);
+      return ok({
+        ...describeItem(item, ctx),
+        description: item.description ?? "",
+        column_values: item.column_values,
+      });
+    },
   );
 
   server.registerTool(
     "create_item",
     {
       title: "Create item",
-      description: "Create a Tiistai board item in a group.",
+      description:
+        "Create a board item in a group. status / priority / due_date are written to the board's Status / Severity / Due date columns. planned_day / planned_week are Helsinki dates.",
       inputSchema: z
         .object({
           board_id: uuid,
           group_id: uuid,
           title: z.string().min(1).max(240),
           description: z.string().max(10000).default(""),
-          status: itemStatus.default("todo"),
-          priority: itemPriority.default("medium"),
-          due_date: z.string().date().nullable().optional(),
-          column_values: z.record(z.string(), z.unknown()).default({}),
+          status: statusInput.default("todo"),
+          priority: priorityInput.optional(),
+          due_date: dueDateInput.optional(),
+          planned_day: plannedDayInput.optional(),
+          planned_week: plannedWeekInput.optional(),
+          column_values: z.record(z.string(), z.unknown()).default({}).describe("Raw values keyed by column id"),
         })
         .strict(),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
@@ -150,6 +196,12 @@ export function registerTiistaiTools(server: McpServer, ownerId: string) {
       await owned(ownerId, "boards", input.board_id);
       const group = await owned<{ board_id: string }>(ownerId, "board_groups", input.group_id);
       if (group.board_id !== input.board_id) throw new Error("group_id does not belong to board_id");
+      const ctx = await loadContext(ownerId);
+      const columnValues = applyItemFields(input.board_id, input.column_values, ctx.columns, {
+        status: input.status,
+        priority: input.priority,
+        due_date: input.due_date,
+      });
 
       const { data: last } = await db()
         .from("items")
@@ -168,16 +220,15 @@ export function registerTiistaiTools(server: McpServer, ownerId: string) {
           group_id: input.group_id,
           title: input.title.trim(),
           description: input.description,
-          status: input.status,
-          priority: input.priority,
-          due_date: input.due_date ?? null,
-          column_values: input.column_values,
+          column_values: columnValues,
+          planned_day: input.planned_day ?? null,
+          planned_week: input.planned_week ? weekStart(input.planned_week) : null,
           position: (last?.position ?? -1) + 1,
         })
-        .select()
+        .select(ITEM_FIELDS)
         .single();
       throwDb(error);
-      return ok(data);
+      return ok(describeItem(data as unknown as ItemRow, ctx));
     },
   );
 
@@ -185,17 +236,20 @@ export function registerTiistaiTools(server: McpServer, ownerId: string) {
     "update_item",
     {
       title: "Update item",
-      description: "Update a board item. Changing group_id moves it within/across groups on the same board.",
+      description:
+        "Update a board item. status / priority / due_date go to the board's Status / Severity / Due date columns (column_values are merged, other keys kept). planned_day sets planned_week too; clearing planned_day keeps planned_week unless you also clear it. Changing group_id moves it within the same board.",
       inputSchema: z
         .object({
           id: uuid,
           title: z.string().min(1).max(240).optional(),
           description: z.string().max(10000).optional(),
-          status: itemStatus.optional(),
-          priority: itemPriority.optional(),
-          due_date: z.string().date().nullable().optional(),
+          status: statusInput.nullable().optional(),
+          priority: priorityInput.nullable().optional(),
+          due_date: dueDateInput.optional(),
+          planned_day: plannedDayInput.optional(),
+          planned_week: plannedWeekInput.optional(),
           group_id: uuid.optional(),
-          column_values: z.record(z.string(), z.unknown()).optional(),
+          column_values: z.record(z.string(), z.unknown()).optional().describe("Raw values keyed by column id"),
           merge_column_values: z
             .boolean()
             .default(true)
@@ -205,23 +259,33 @@ export function registerTiistaiTools(server: McpServer, ownerId: string) {
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async ({ id, merge_column_values, ...patch }) => {
-      const item = await owned<{
-        board_id: string;
-        group_id: string;
-        column_values: Record<string, unknown>;
-      }>(ownerId, "items", id);
+      const item = await owned<ItemRow>(ownerId, "items", id);
+      const ctx = await loadContext(ownerId);
 
       const values: Record<string, unknown> = {};
       if (patch.title !== undefined) values.title = patch.title.trim();
       if (patch.description !== undefined) values.description = patch.description;
-      if (patch.status !== undefined) values.status = patch.status;
-      if (patch.priority !== undefined) values.priority = patch.priority;
-      if (patch.due_date !== undefined) values.due_date = patch.due_date;
-      if (patch.column_values !== undefined) {
-        values.column_values = merge_column_values
-          ? { ...(item.column_values ?? {}), ...patch.column_values }
-          : patch.column_values;
+      if (patch.planned_day !== undefined) values.planned_day = patch.planned_day;
+      if (patch.planned_week !== undefined) {
+        values.planned_week = patch.planned_week ? weekStart(patch.planned_week) : null;
       }
+
+      const touchesFields =
+        patch.status !== undefined || patch.priority !== undefined || patch.due_date !== undefined;
+      if (patch.column_values !== undefined || touchesFields) {
+        const base =
+          patch.column_values === undefined
+            ? (item.column_values ?? {})
+            : merge_column_values
+              ? { ...(item.column_values ?? {}), ...patch.column_values }
+              : patch.column_values;
+        values.column_values = applyItemFields(item.board_id, base, ctx.columns, {
+          status: patch.status,
+          priority: patch.priority,
+          due_date: patch.due_date,
+        });
+      }
+
       if (patch.group_id !== undefined && patch.group_id !== item.group_id) {
         const group = await owned<{ board_id: string }>(ownerId, "board_groups", patch.group_id);
         if (group.board_id !== item.board_id) throw new Error("group_id must belong to the item's board");
@@ -238,15 +302,16 @@ export function registerTiistaiTools(server: McpServer, ownerId: string) {
       }
 
       if (!Object.keys(values).length) return fail("No fields to update.");
+      values.updated_at = new Date().toISOString();
       const { data, error } = await db()
         .from("items")
         .update(values)
         .eq("id", id)
         .eq("owner_id", ownerId)
-        .select()
+        .select(ITEM_FIELDS)
         .single();
       throwDb(error);
-      return ok(data);
+      return ok(describeItem(data as unknown as ItemRow, ctx));
     },
   );
 
@@ -390,4 +455,6 @@ export function registerTiistaiTools(server: McpServer, ownerId: string) {
       return ok({ deleted: id });
     },
   );
+
+  registerPlanningTools(server, ownerId);
 }

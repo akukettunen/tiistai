@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
 
 const TABS = [
+  { href: "/", label: "Etusivu" },
   { href: "/board", label: "Tiistai" },
   // { href: "/putkiajo", label: "PutkiAjo" },
 ];
@@ -24,7 +25,9 @@ export function AppTopBar({
       <nav className="flex h-full items-stretch gap-1" aria-label="Apps">
         {TABS.map((tab) => {
           const active =
-            pathname === tab.href || pathname.startsWith(`${tab.href}/`);
+            tab.href === "/"
+              ? pathname === "/"
+              : pathname === tab.href || pathname.startsWith(`${tab.href}/`);
           return (
             <Link
               key={tab.href}

@@ -2,7 +2,12 @@ import { redirect } from "next/navigation";
 import { BoardWorkspace } from "@/components/board-workspace";
 import { createClient } from "@/lib/supabase/server";
 
-export default async function BoardPage() {
+export default async function BoardPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
+}) {
+  const { board: boardParam } = await searchParams;
   const supabase = await createClient();
   const { data: authData } = await supabase.auth.getUser();
 
@@ -40,6 +45,7 @@ export default async function BoardPage() {
       initialItems={items.data ?? []}
       initialAutomations={automations.data ?? []}
       initialError={loadError?.message ?? null}
+      initialBoardId={typeof boardParam === "string" ? boardParam : undefined}
     />
   );
 }

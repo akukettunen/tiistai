@@ -4,6 +4,7 @@ import Link from "next/link";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { ArrowLeft, Check, Layers3, Plus } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
+import type { ColumnSettings } from "@/lib/planning";
 
 type Board = {
   id: string;
@@ -19,14 +20,12 @@ type Group = {
   position: number;
 };
 
-type LabelOption = { id: string; label: string; color: string };
-
 type BoardColumn = {
   id: string;
   board_id: string;
   title: string;
   type: "label" | "text" | "long_text" | "date" | "checkbox";
-  settings: { options?: LabelOption[] };
+  settings: ColumnSettings;
   position: number;
 };
 
