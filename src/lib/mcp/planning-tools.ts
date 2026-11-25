@@ -1,6 +1,5 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
-import { pushBlock, removeBlock } from "@/lib/calendar/blocks";
 import { fail, ok, throwDb } from "@/lib/mcp/result";
 import {
   ITEM_FIELDS,
@@ -29,7 +28,6 @@ import {
   todayIso,
   weekRangeUtc,
   weekStart,
-  type CalendarEvent,
   type LabelOption,
   type PlanningColumn,
   type TimeBlock,
@@ -41,7 +39,7 @@ const columnRole = z.enum(["status", "severity", "due_date"]);
 const optionState = z.enum(["done", "in_progress"]);
 
 const BLOCK_FIELDS =
-  "id, title, kind, starts_at, ends_at, board_id, item_id, note_before, note_after, done_at, sync_status, google_event_id";
+  "id, title, kind, starts_at, ends_at, board_id, item_id, note_before, note_after, done_at";
 
 type BlockRow = Pick<
   TimeBlock,
@@ -55,8 +53,6 @@ type BlockRow = Pick<
   | "note_before"
   | "note_after"
   | "done_at"
-  | "sync_status"
-  | "google_event_id"
 >;
 
 function describeBlock(block: BlockRow) {
@@ -66,18 +62,6 @@ function describeBlock(block: BlockRow) {
     start: helsinkiTime(block.starts_at),
     end: helsinkiTime(block.ends_at),
     hours: Math.round(blockHours(block) * 100) / 100,
-  };
-}
-
-function describeEvent(event: Pick<CalendarEvent, "title" | "starts_at" | "ends_at" | "all_day" | "calendar_id">) {
-  return {
-    title: event.title,
-    calendar_id: event.calendar_id,
-    all_day: event.all_day,
-    starts_at: event.starts_at,
-    ends_at: event.ends_at,
-    start: event.all_day ? null : helsinkiTime(event.starts_at),
-    end: event.all_day ? null : helsinkiTime(event.ends_at),
   };
 }
 
@@ -101,13 +85,6 @@ function dayRangeUtc(date: string) {
   };
 }
 
-async function syncBlock(ownerId: string, blockId: string) {
-  try {
-    return await pushBlock(db(), ownerId, blockId);
-  } catch (error) {
-    return { sync_status: "error" as const, error: error instanceof Error ? error.message : String(error) };
-  }
-}
 
 async function readBlock(ownerId: string, id: string) {
   const { data, error } = await db()
@@ -151,7 +128,7 @@ export function registerPlanningTools(server: McpServer, ownerId: string) {
     {
       title: "Get today",
       description:
-        "Today's plan (Europe/Helsinki date): items planned for today, left-over undone items (planned earlier this week or for last week), today's time blocks, and cached Google Calendar events.",
+        "Today's plan (Europe/Helsinki date): items planned for today, left-over undone items (planned earlier this week or for last week), and today's time blocks.",
       inputSchema: z.object({}).strict(),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
@@ -160,7 +137,7 @@ export function registerPlanningTools(server: McpServer, ownerId: string) {
       const monday = weekStart(today);
       const lastMonday = addDays(monday, -7);
       const range = dayRangeUtc(today);
-      const [ctx, planned, leftover, blocks, events] = await Promise.all([
+      const [ctx, planned, leftover, blocks] = await Promise.all([
         loadContext(ownerId),
         db().from("items").select(ITEM_FIELDS).eq("owner_id", ownerId).eq("planned_day", today).order("position"),
         db()
@@ -170,17 +147,9 @@ export function registerPlanningTools(server: McpServer, ownerId: string) {
           .or(`and(planned_day.gte.${monday},planned_day.lt.${today}),planned_week.eq.${lastMonday}`)
           .order("planned_day", { ascending: true, nullsFirst: false }),
         blocksBetween(ownerId, range.start, range.end),
-        db()
-          .from("calendar_events_cache")
-          .select("title, calendar_id, starts_at, ends_at, all_day")
-          .eq("owner_id", ownerId)
-          .lt("starts_at", range.end)
-          .gt("ends_at", range.start)
-          .order("starts_at"),
       ]);
       throwDb(planned.error);
       throwDb(leftover.error);
-      throwDb(events.error);
       const plannedItems = (planned.data ?? []) as unknown as ItemRow[];
       const leftoverItems = ((leftover.data ?? []) as unknown as ItemRow[]).filter(
         (item) => !isDone(item, ctx.columns) && item.planned_day !== today,
@@ -192,7 +161,6 @@ export function registerPlanningTools(server: McpServer, ownerId: string) {
         planned: plannedItems.map((item) => describeItem(item, ctx)),
         leftover: leftoverItems.map((item) => describeItem(item, ctx)),
         time_blocks: blocks.map(describeBlock),
-        calendar_events: ((events.data ?? []) as CalendarEvent[]).map(describeEvent),
       });
     },
   );
@@ -321,7 +289,7 @@ export function registerPlanningTools(server: McpServer, ownerId: string) {
     {
       title: "Create time block",
       description:
-        "Create a time block (focus / free_coding / admin / other) and push it to the Tiistai Google calendar when connected. Times without an offset are Helsinki local time.",
+        "Create a time block (focus / free_coding / admin / other). Times without an offset are Helsinki local time.",
       inputSchema: z
         .object({
           title: z.string().max(240).default(""),
@@ -333,7 +301,7 @@ export function registerPlanningTools(server: McpServer, ownerId: string) {
           note_before: z.string().max(10000).default(""),
         })
         .strict(),
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
     async (input) => {
       const starts = parseTimestamp(input.starts_at, "starts_at");
@@ -356,8 +324,7 @@ export function registerPlanningTools(server: McpServer, ownerId: string) {
         .single();
       throwDb(error);
       const { id } = data as { id: string };
-      const sync = await syncBlock(ownerId, id);
-      return ok({ block: await readBlock(ownerId, id), sync });
+      return ok({ block: await readBlock(ownerId, id) });
     },
   );
 
@@ -366,7 +333,7 @@ export function registerPlanningTools(server: McpServer, ownerId: string) {
     {
       title: "Update time block",
       description:
-        "Update a time block and re-sync it to Google Calendar. Times without an offset are Helsinki local time. done=true marks it done (sets done_at), done=false clears it.",
+        "Update a time block. Times without an offset are Helsinki local time. done=true marks it done (sets done_at), done=false clears it.",
       inputSchema: z
         .object({
           block_id: uuid,
@@ -381,7 +348,7 @@ export function registerPlanningTools(server: McpServer, ownerId: string) {
           done: z.boolean().optional(),
         })
         .strict(),
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async ({ block_id, ...patch }) => {
       const block = await owned<TimeBlock>(ownerId, "time_blocks", block_id);
@@ -407,8 +374,7 @@ export function registerPlanningTools(server: McpServer, ownerId: string) {
       values.updated_at = new Date().toISOString();
       const { error } = await db().from("time_blocks").update(values).eq("id", block_id).eq("owner_id", ownerId);
       throwDb(error);
-      const sync = await syncBlock(ownerId, block_id);
-      return ok({ block: await readBlock(ownerId, block_id), sync });
+      return ok({ block: await readBlock(ownerId, block_id) });
     },
   );
 
@@ -416,13 +382,14 @@ export function registerPlanningTools(server: McpServer, ownerId: string) {
     "delete_time_block",
     {
       title: "Delete time block",
-      description: "Delete a time block and its Google Calendar event. Requires confirm=true.",
+      description: "Delete a time block. Requires confirm=true.",
       inputSchema: z.object({ block_id: uuid, confirm: z.literal(true) }).strict(),
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     },
     async ({ block_id }) => {
       await owned(ownerId, "time_blocks", block_id);
-      await removeBlock(db(), ownerId, block_id);
+      const { error } = await db().from("time_blocks").delete().eq("id", block_id).eq("owner_id", ownerId);
+      throwDb(error);
       return ok({ deleted: block_id });
     },
   );

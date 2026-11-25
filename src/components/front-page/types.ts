@@ -1,5 +1,4 @@
 import type {
-  CalendarEvent,
   PlanningColumn,
   PlanningItem,
   TimeBlock,
@@ -30,8 +29,6 @@ export type FrontPageData = {
   columns: PlanningColumn[];
   items: FrontItem[];
   blocks: TimeBlock[];
-  events: CalendarEvent[];
-  calendarConnected: boolean;
   inboxOpenCount: number;
   inProgressByBoard: Record<string, number>;
   loadError: string | null;

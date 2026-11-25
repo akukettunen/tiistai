@@ -18,7 +18,7 @@ export default async function Home() {
   const today = todayIso();
   const monday = weekStart(today);
 
-  const [boards, columns, groups, weekItems, schedule, account, statusItems] =
+  const [boards, columns, groups, weekItems, schedule, statusItems] =
     await Promise.all([
       supabase
         .from("boards")
@@ -33,7 +33,6 @@ export default async function Home() {
         .order("position"),
       loadWeekItems(supabase, monday),
       loadWeekSchedule(supabase, monday),
-      supabase.from("calendar_accounts").select("id, status").maybeSingle(),
       // Light-weight pass over every item for the Inbox / in-progress counters.
       supabase.from("items").select("id, board_id, column_values"),
     ]);
@@ -77,8 +76,6 @@ export default async function Home() {
         columns: columnList,
         items: weekItems.data,
         blocks: schedule.blocks,
-        events: schedule.events,
-        calendarConnected: Boolean(account.data) && account.data?.status !== "revoked",
         inboxOpenCount,
         inProgressByBoard,
         loadError,

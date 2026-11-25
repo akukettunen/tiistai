@@ -1,14 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import {
   AlertTriangle,
-  CalendarDays,
   ChevronLeft,
   ChevronRight,
   Inbox,
-  Loader2,
   X,
 } from "lucide-react";
 import { AppTopBar } from "@/components/app-top-bar";
@@ -26,8 +24,6 @@ import {
   isoWeekNumber,
   weekRangeUtc,
   weekStart,
-  type CalendarEvent,
-  type SyncStatus,
   type TimeBlock,
 } from "@/lib/planning";
 import { BlockDialog } from "./block-dialog";
@@ -84,20 +80,6 @@ function upsertBlock(current: TimeBlock[], block: TimeBlock) {
   );
 }
 
-async function postJson(url: string, body: unknown) {
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!response.ok) return null;
-    return (await response.json()) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
-}
-
 function draftFromBlock(block: TimeBlock): BlockDraft {
   return {
     id: block.id,
@@ -126,9 +108,6 @@ export function FrontPage({ data }: { data: FrontPageData }) {
 
   const [items, setItems] = useState(data.items);
   const [blocks, setBlocks] = useState(data.blocks);
-  const [events, setEvents] = useState<CalendarEvent[]>(data.events);
-  const [connected, setConnected] = useState(data.calendarConnected);
-  const [refreshing, setRefreshing] = useState(true);
   const [viewMonday, setViewMonday] = useState(currentMonday);
   const [inboxOpenCount, setInboxOpenCount] = useState(data.inboxOpenCount);
   const [busyItems, setBusyItems] = useState<Set<string>>(new Set());
@@ -144,26 +123,6 @@ export function FrontPage({ data }: { data: FrontPageData }) {
         .sort((a, b) => a.position - b.position)[0]
     : undefined;
 
-  // Calendar refresh for the viewed week; the page works without it.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const result = await postJson("/api/calendar/refresh", { week: viewMonday });
-      if (cancelled) return;
-      if (result && typeof result.connected === "boolean") setConnected(result.connected);
-      const schedule = await loadWeekSchedule(supabase, viewMonday);
-      if (cancelled) return;
-      if (!schedule.error) {
-        setBlocks((current) => mergeWeek(current, schedule.blocks, viewMonday));
-        setEvents((current) => mergeWeek(current, schedule.events, viewMonday));
-      }
-      setRefreshing(false);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [supabase, viewMonday]);
-
   function notify(message: string) {
     setToast(message);
     window.setTimeout(() => setToast((t) => (t === message ? null : t)), 4000);
@@ -171,11 +130,9 @@ export function FrontPage({ data }: { data: FrontPageData }) {
 
   function goToWeek(monday: string) {
     setViewMonday(monday);
-    setRefreshing(true);
     loadWeekSchedule(supabase, monday).then((schedule) => {
       if (schedule.error) return notify(schedule.error);
       setBlocks((current) => mergeWeek(current, schedule.blocks, monday));
-      setEvents((current) => mergeWeek(current, schedule.events, monday));
     });
     loadWeekItems(supabase, monday).then(({ data: loaded, error }) => {
       if (error) return notify(error);
@@ -260,20 +217,6 @@ export function FrontPage({ data }: { data: FrontPageData }) {
   // Blocks
   // -------------------------------------------------------------------------
 
-  const pendingStatus: SyncStatus = connected ? "pending" : "local";
-
-  async function pushBlock(blockId: string) {
-    const result = await postJson("/api/calendar/blocks/push", { blockId });
-    const status = result?.sync_status;
-    if (typeof status === "string") {
-      setBlocks((current) =>
-        current.map((b) =>
-          b.id === blockId ? { ...b, sync_status: status as SyncStatus } : b,
-        ),
-      );
-    }
-  }
-
   function openCreate(day: string, startMin: number) {
     const start = Math.min(startMin, 23 * 60);
     setDialog({
@@ -309,7 +252,6 @@ export function FrontPage({ data }: { data: FrontPageData }) {
       note_before: draft.note_before,
       note_after: draft.note_after,
       done_at: draft.done_at,
-      sync_status: pendingStatus,
       updated_at: new Date().toISOString(),
     };
     const query = draft.id
@@ -320,7 +262,6 @@ export function FrontPage({ data }: { data: FrontPageData }) {
     if (error || !saved) return notify(error?.message ?? "Tallennus epäonnistui");
     setBlocks((current) => upsertBlock(current, saved as TimeBlock));
     setDialog(null);
-    void pushBlock((saved as TimeBlock).id);
   }
 
   async function moveBlock(block: TimeBlock, day: string, deltaMin: number) {
@@ -336,11 +277,11 @@ export function FrontPage({ data }: { data: FrontPageData }) {
     const ends_at = new Date(start.getTime() + durationMs).toISOString();
     if (starts_at === new Date(block.starts_at).toISOString()) return;
 
-    const optimistic = { ...block, starts_at, ends_at, sync_status: pendingStatus };
+    const optimistic = { ...block, starts_at, ends_at };
     setBlocks((current) => upsertBlock(current, optimistic));
     const { data: saved, error } = await supabase
       .from("time_blocks")
-      .update({ starts_at, ends_at, sync_status: pendingStatus, updated_at: new Date().toISOString() })
+      .update({ starts_at, ends_at, updated_at: new Date().toISOString() })
       .eq("id", block.id)
       .select()
       .single();
@@ -349,21 +290,13 @@ export function FrontPage({ data }: { data: FrontPageData }) {
       return notify(error?.message ?? "Siirto epäonnistui");
     }
     setBlocks((current) => upsertBlock(current, saved as TimeBlock));
-    void pushBlock(block.id);
   }
 
   async function deleteBlock(blockId: string) {
     setSaving(true);
-    const result = await postJson("/api/calendar/blocks/remove", { blockId });
-    if (!result?.ok) {
-      // Endpoint unavailable: remove the row directly so the page still works.
-      const { error } = await supabase.from("time_blocks").delete().eq("id", blockId);
-      if (error) {
-        setSaving(false);
-        return notify(error.message);
-      }
-    }
+    const { error } = await supabase.from("time_blocks").delete().eq("id", blockId);
     setSaving(false);
+    if (error) return notify(error.message);
     setBlocks((current) => current.filter((b) => b.id !== blockId));
     setDialog(null);
   }
@@ -385,11 +318,6 @@ export function FrontPage({ data }: { data: FrontPageData }) {
   );
   const weekList = items.filter((i) => i.planned_week === viewMonday);
   const weekBlocks = blocks.filter((b) => inWeek(b.starts_at, viewMonday));
-  const weekEvents = events.filter(
-    (e) =>
-      new Date(e.ends_at).getTime() > new Date(weekRangeUtc(viewMonday).start).getTime() &&
-      new Date(e.starts_at).getTime() < new Date(weekRangeUtc(viewMonday).end).getTime(),
-  );
   const freeCoding = weekBlocks.filter((b) => b.kind === "free_coding");
   const freeTotal = freeCoding.reduce((sum, b) => sum + blockHours(b), 0);
   const freeUsed = freeCoding
@@ -410,28 +338,6 @@ export function FrontPage({ data }: { data: FrontPageData }) {
               vko {isoWeekNumber(today)} · {weekdayFi(today)} {shortDateFi(today)}
             </p>
           </div>
-          <div className="ml-auto flex items-center gap-2 text-xs text-[#8b8998]">
-            {refreshing && (
-              <span className="inline-flex items-center gap-1">
-                <Loader2 size={13} className="animate-spin" /> Päivitetään kalenteria…
-              </span>
-            )}
-            {connected ? (
-              <Link
-                href="/settings/calendar"
-                className="inline-flex items-center gap-1 hover:text-[#29283a]"
-              >
-                <CalendarDays size={14} /> Google Kalenteri
-              </Link>
-            ) : (
-              <Link
-                href="/settings/calendar"
-                className="inline-flex items-center gap-1 text-[#6c63ff] hover:underline"
-              >
-                <CalendarDays size={14} /> Yhdistä Google Kalenteri
-              </Link>
-            )}
-          </div>
         </header>
 
         {/* ------------------------------------------------------------ */}
@@ -441,7 +347,6 @@ export function FrontPage({ data }: { data: FrontPageData }) {
             <TodayTimeline
               day={today}
               blocks={blocks}
-              events={events}
               boardsById={boardsById}
               onCreate={openCreate}
               onEdit={openEdit}
@@ -570,7 +475,6 @@ export function FrontPage({ data }: { data: FrontPageData }) {
             monday={viewMonday}
             today={today}
             blocks={weekBlocks}
-            events={weekEvents}
             onCreate={openCreate}
             onEdit={openEdit}
             onMove={moveBlock}

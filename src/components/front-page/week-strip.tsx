@@ -1,7 +1,6 @@
 "use client";
 
 import { useRef, type MouseEvent } from "react";
-import { CloudOff } from "lucide-react";
 import {
   DndContext,
   PointerSensor,
@@ -16,10 +15,9 @@ import {
   helsinkiDate,
   helsinkiTime,
   weekDays,
-  type CalendarEvent,
   type TimeBlock,
 } from "@/lib/planning";
-import { allDayCovers, hourRange, isUnsynced, segmentForDay } from "./schedule";
+import { hourRange, segmentForDay } from "./schedule";
 import {
   BLOCK_KIND_LABEL,
   BLOCK_KIND_STYLE,
@@ -36,7 +34,6 @@ export function WeekStrip({
   monday,
   today,
   blocks,
-  events,
   onCreate,
   onEdit,
   onMove,
@@ -44,7 +41,6 @@ export function WeekStrip({
   monday: string;
   today: string;
   blocks: TimeBlock[];
-  events: CalendarEvent[];
   onCreate: (day: string, startMin: number) => void;
   onEdit: (block: TimeBlock) => void;
   /** Move a block to `day`, keeping its wall-clock start shifted by `deltaMin`. */
@@ -58,11 +54,6 @@ export function WeekStrip({
 
   const perDay = days.map((day) => ({
     day,
-    allDay: events.filter((e) => e.all_day && allDayCovers(e, day)),
-    events: events
-      .filter((e) => !e.all_day)
-      .map((event) => ({ event, seg: segmentForDay(event.starts_at, event.ends_at, day) }))
-      .filter((e): e is { event: CalendarEvent; seg: Seg } => e.seg !== null),
     blocks: blocks
       // A block belongs to the day it starts on (keeps drag simple).
       .map((block) => ({ block, seg: segmentForDay(block.starts_at, block.ends_at, day) }))
@@ -73,11 +64,10 @@ export function WeekStrip({
   }));
 
   const { startHour, endHour } = hourRange(
-    perDay.flatMap((d) => [...d.events.map((e) => e.seg), ...d.blocks.map((b) => b.seg)]),
+    perDay.flatMap((d) => d.blocks.map((b) => b.seg)),
   );
   const height = (endHour - startHour) * PX_PER_HOUR;
   const top = (min: number) => ((min - startHour * 60) / 60) * PX_PER_HOUR;
-  const maxAllDay = Math.max(0, ...perDay.map((d) => d.allDay.length));
 
   function handleDragEnd(event: DragEndEvent) {
     justDragged.current = true;
@@ -98,7 +88,6 @@ export function WeekStrip({
         <div className="flex min-w-[720px]">
           <div className="w-9 shrink-0">
             <div className="h-10" />
-            <div style={{ height: maxAllDay * 20 }} />
             <div className="relative" style={{ height }}>
               {Array.from({ length: endHour - startHour + 1 }, (_, i) => (
                 <span
@@ -111,48 +100,21 @@ export function WeekStrip({
               ))}
             </div>
           </div>
-          {perDay.map(({ day, allDay, events: dayEvents, blocks: dayBlocks }) => (
+          {perDay.map(({ day, blocks: dayBlocks }) => (
             <DayColumn
               key={day}
               day={day}
               isToday={day === today}
               height={height}
               startHour={startHour}
-              allDaySlots={maxAllDay}
               onCreate={onCreate}
             >
-              {allDay.length > 0 && (
-                <div className="absolute inset-x-0.5 -top-0.5 -translate-y-full space-y-0.5">
-                  {allDay.map((e) => (
-                    <div
-                      key={e.id}
-                      className="h-[18px] truncate rounded bg-[#eceafd] px-1 text-[10px] font-medium leading-[18px] text-[#4b4592]"
-                      title={e.title}
-                    >
-                      {e.title || "(ei otsikkoa)"}
-                    </div>
-                  ))}
-                </div>
-              )}
               {Array.from({ length: endHour - startHour }, (_, i) => (
                 <div
                   key={i}
                   className="pointer-events-none absolute inset-x-0 border-t border-[#f0f0f5]"
                   style={{ top: i * PX_PER_HOUR }}
                 />
-              ))}
-              {dayEvents.map(({ event, seg }) => (
-                <div
-                  key={event.id}
-                  className="pointer-events-none absolute inset-x-0.5 overflow-hidden rounded border border-[#d9d7f5] bg-[#f3f2ff]/90 px-1 text-[10px] leading-tight text-[#4b4592]"
-                  style={{
-                    top: top(seg.startMin),
-                    height: Math.max(12, top(seg.endMin) - top(seg.startMin) - 1),
-                  }}
-                  title={`${event.title} ${helsinkiTime(event.starts_at)}–${helsinkiTime(event.ends_at)}`}
-                >
-                  {event.title || "(ei otsikkoa)"}
-                </div>
               ))}
               {dayBlocks.map(({ block, seg }) => (
                 <DraggableBlock
@@ -178,7 +140,6 @@ function DayColumn({
   isToday,
   height,
   startHour,
-  allDaySlots,
   onCreate,
   children,
 }: {
@@ -186,7 +147,6 @@ function DayColumn({
   isToday: boolean;
   height: number;
   startHour: number;
-  allDaySlots: number;
   onCreate: (day: string, startMin: number) => void;
   children: React.ReactNode;
 }) {
@@ -208,7 +168,6 @@ function DayColumn({
         <span className="uppercase">{weekdayFi(day)}</span>
         <span className="text-[11px] font-medium">{shortDateFi(day)}</span>
       </div>
-      <div style={{ height: allDaySlots * 20 }} />
       <div
         ref={setNodeRef}
         className={`relative cursor-copy ${isOver ? "bg-[#f3f2ff]" : isToday ? "bg-[#fafaff]" : ""}`}
@@ -254,9 +213,7 @@ function DraggableBlock({
         opacity: block.done_at ? 0.6 : 1,
         transform: CSS.Translate.toString(transform),
       }}
-      title={`${block.title || BLOCK_KIND_LABEL[block.kind]} ${helsinkiTime(block.starts_at)}–${helsinkiTime(block.ends_at)}${
-        isUnsynced(block.sync_status) ? " · ei synkattu" : ""
-      }`}
+      title={`${block.title || BLOCK_KIND_LABEL[block.kind]} ${helsinkiTime(block.starts_at)}–${helsinkiTime(block.ends_at)}`}
       onClick={(event) => {
         event.stopPropagation();
         onClick();
@@ -264,9 +221,6 @@ function DraggableBlock({
     >
       <span className="flex items-center gap-0.5 font-semibold">
         <span className="truncate">{block.title || BLOCK_KIND_LABEL[block.kind]}</span>
-        {isUnsynced(block.sync_status) && (
-          <CloudOff size={9} className="ml-auto shrink-0" aria-label="ei synkattu" />
-        )}
       </span>
       {height > 28 && (
         <span className="block truncate opacity-85">

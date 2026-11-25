@@ -32,17 +32,3 @@ export function hourRange(
   }
   return { startHour: Math.max(0, startHour), endHour: Math.min(24, endHour) };
 }
-
-export function isUnsynced(status: string) {
-  return status === "pending" || status === "error";
-}
-
-/**
- * Whether an all-day event covers `day`. Works whether the cache stores the
- * bounds as Helsinki or UTC midnights (end is exclusive).
- */
-export function allDayCovers(event: { starts_at: string; ends_at: string }, day: string) {
-  const start = helsinkiDate(event.starts_at);
-  const end = helsinkiDate(event.ends_at);
-  return start === end ? start === day : start <= day && day < end;
-}

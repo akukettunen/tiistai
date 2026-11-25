@@ -1,4 +1,4 @@
-// Shared planning helpers for the front page, board UI, calendar sync and MCP.
+// Shared planning helpers for the front page, board UI and MCP.
 // Isomorphic: safe to import from client components and server code.
 //
 // Source of truth (see supabase/migrations/20261125124912_front_page_planning.sql):
@@ -48,7 +48,6 @@ export type PlanningItem = {
 };
 
 export type TimeBlockKind = "focus" | "free_coding" | "admin" | "other";
-export type SyncStatus = "local" | "synced" | "pending" | "error";
 
 export type TimeBlock = {
   id: string;
@@ -62,22 +61,8 @@ export type TimeBlock = {
   note_before: string;
   note_after: string;
   done_at: string | null;
-  google_calendar_id: string | null;
-  google_event_id: string | null;
-  google_etag: string | null;
-  sync_status: SyncStatus;
   created_at: string;
   updated_at: string;
-};
-
-export type CalendarEvent = {
-  id: string;
-  calendar_id: string;
-  google_event_id: string;
-  title: string;
-  starts_at: string;
-  ends_at: string;
-  all_day: boolean;
 };
 
 // ---------------------------------------------------------------------------
