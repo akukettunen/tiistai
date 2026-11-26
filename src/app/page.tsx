@@ -1,13 +1,13 @@
 import { redirect } from "next/navigation";
 import { FrontPage } from "@/components/front-page/front-page";
-import { loadWeekItems, loadWeekSchedule } from "@/components/front-page/queries";
 import {
-  isInboxBoard,
-  isProductBoard,
+  ITEM_FIELDS,
+  type FrontAutomation,
   type FrontBoard,
   type FrontGroup,
+  type FrontItem,
 } from "@/components/front-page/types";
-import { isDone, isInProgress, todayIso, weekStart, type PlanningColumn } from "@/lib/planning";
+import { todayIso, type PlanningColumn } from "@/lib/planning";
 import { createClient } from "@/lib/supabase/server";
 
 export default async function Home() {
@@ -15,69 +15,40 @@ export default async function Home() {
   const { data: authData } = await supabase.auth.getUser();
   if (!authData.user) redirect("/auth");
 
-  const today = todayIso();
-  const monday = weekStart(today);
-
-  const [boards, columns, groups, weekItems, schedule, statusItems] =
-    await Promise.all([
-      supabase
-        .from("boards")
-        .select("id, name, color, position")
-        .is("archived_at", null)
-        .order("position")
-        .order("created_at"),
-      supabase.from("board_columns").select("*").order("position"),
-      supabase
-        .from("board_groups")
-        .select("id, board_id, name, position")
-        .order("position"),
-      loadWeekItems(supabase, monday),
-      loadWeekSchedule(supabase, monday),
-      // Light-weight pass over every item for the Inbox / in-progress counters.
-      supabase.from("items").select("id, board_id, column_values"),
-    ]);
-
-  const boardList = (boards.data ?? []) as FrontBoard[];
-  const columnList = (columns.data ?? []) as PlanningColumn[];
-  const inbox = boardList.find(isInboxBoard);
-  const productIds = new Set(boardList.filter(isProductBoard).map((b) => b.id));
-
-  let inboxOpenCount = 0;
-  const inProgressByBoard: Record<string, number> = {};
-  for (const item of (statusItems.data ?? []) as {
-    id: string;
-    board_id: string;
-    column_values: Record<string, unknown>;
-  }[]) {
-    if (inbox && item.board_id === inbox.id && !isDone(item, columnList)) {
-      inboxOpenCount += 1;
-    }
-    if (productIds.has(item.board_id) && isInProgress(item, columnList)) {
-      inProgressByBoard[item.board_id] = (inProgressByBoard[item.board_id] ?? 0) + 1;
-    }
-  }
+  const [boards, columns, groups, items, automations] = await Promise.all([
+    supabase
+      .from("boards")
+      .select("id, name, color, position")
+      .is("archived_at", null)
+      .order("position")
+      .order("created_at"),
+    supabase.from("board_columns").select("*").order("position"),
+    supabase.from("board_groups").select("id, board_id, name, position").order("position"),
+    // Every item: the kanban's "Kaikki" column lists all open items across boards.
+    supabase.from("items").select(ITEM_FIELDS).order("position").range(0, 4999),
+    supabase
+      .from("board_automations")
+      .select("board_id, trigger_column_id, trigger_value, target_group_id, enabled"),
+  ]);
 
   const loadError =
     boards.error?.message ??
     columns.error?.message ??
     groups.error?.message ??
-    weekItems.error ??
-    schedule.error ??
-    statusItems.error?.message ??
+    items.error?.message ??
+    automations.error?.message ??
     null;
 
   return (
     <FrontPage
       data={{
         userId: authData.user.id,
-        today,
-        boards: boardList,
+        today: todayIso(),
+        boards: (boards.data ?? []) as FrontBoard[],
         groups: (groups.data ?? []) as FrontGroup[],
-        columns: columnList,
-        items: weekItems.data,
-        blocks: schedule.blocks,
-        inboxOpenCount,
-        inProgressByBoard,
+        columns: (columns.data ?? []) as PlanningColumn[],
+        items: (items.data ?? []) as FrontItem[],
+        automations: (automations.data ?? []) as FrontAutomation[],
         loadError,
       }}
     />

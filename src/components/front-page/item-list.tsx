@@ -1,207 +1,289 @@
 "use client";
 
-import { useState, type FormEvent, type ReactNode } from "react";
-import { Check, Plus, X } from "lucide-react";
-import {
-  isDone,
-  statusOption,
-  type PlanningColumn,
-} from "@/lib/planning";
-import type { FrontBoard, FrontItem } from "./types";
+import { useState, type FormEvent } from "react";
+import { useDraggable, useDroppable } from "@dnd-kit/core";
+import { Archive, ArchiveRestore, Check, Plus, X } from "lucide-react";
+import { dueDate, isDone, roleOption, type PlanningColumn } from "@/lib/planning";
+import { shortDateFi, type FrontBoard, type FrontItem } from "./types";
 
-export function ItemRow({
-  item,
-  board,
-  columns,
-  busy,
-  onToggle,
-  actions,
-}: {
+export type ColumnId = "all" | "week" | "today";
+
+type CardProps = {
   item: FrontItem;
   board: FrontBoard | undefined;
   columns: PlanningColumn[];
   busy: boolean;
+  badge?: { text: string; tone?: "warn" | "muted" };
   onToggle: (item: FrontItem, done: boolean) => void;
-  actions?: ReactNode;
-}) {
+  onArchive: (item: FrontItem, archived: boolean) => void;
+  onOpen?: (item: FrontItem) => void;
+};
+
+/** Visual card, shared by the draggable card and the drag overlay. */
+export function ItemCard({
+  item,
+  board,
+  columns,
+  busy,
+  badge,
+  onToggle,
+  onArchive,
+  dragging = false,
+}: CardProps & { dragging?: boolean }) {
   const done = isDone(item, columns);
-  const status = statusOption(item, columns);
+  const status = roleOption(item, columns, "status");
+  const severity = roleOption(item, columns, "severity");
+  const due = dueDate(item, columns);
+  const archived = Boolean(item.archived_at);
   return (
-    <li className="group flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-xl px-2 py-2 hover:bg-[#f7f7fa]">
+    <div
+      className={`group/card flex items-start gap-2.5 rounded-xl border bg-white px-3 py-2.5 ${
+        archived ? "opacity-60" : ""
+      } ${
+        dragging
+          ? "rotate-1 border-[#6c63ff] shadow-xl"
+          : "border-[#e8e8ef] shadow-[0_1px_2px_rgba(20,20,50,0.04)] hover:border-[#cfcde0]"
+      }`}
+    >
       <button
         type="button"
         role="checkbox"
         aria-checked={done}
         aria-label={done ? "Merkitse keskeneräiseksi" : "Merkitse valmiiksi"}
         disabled={busy}
-        onClick={() => onToggle(item, !done)}
-        className={`grid size-5 shrink-0 place-items-center rounded-md border transition-colors disabled:opacity-50 ${
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.stopPropagation();
+          onToggle(item, !done);
+        }}
+        className={`mt-0.5 grid size-[18px] shrink-0 place-items-center rounded-md border transition-colors disabled:opacity-50 ${
           done
             ? "border-[#00a86b] bg-[#00a86b] text-white"
             : "border-[#c9c7d6] bg-white hover:border-[#6c63ff]"
         }`}
       >
-        {done && <Check size={13} strokeWidth={3} />}
+        {done && <Check size={12} strokeWidth={3} />}
       </button>
-      <span
-        className={`min-w-0 flex-1 truncate text-sm ${
-          done ? "text-[#9997a5] line-through" : "font-medium text-[#29283a]"
-        }`}
-        title={item.title}
-      >
-        {item.title || "(nimetön)"}
-      </span>
-      <span className="flex shrink-0 items-center gap-2">
-        {board && (
-          <span className="inline-flex max-w-32 items-center gap-1.5 truncate text-xs text-[#6e6c7d]">
+      <div className="min-w-0 flex-1">
+        <p
+          className={`line-clamp-2 text-sm leading-snug ${
+            done ? "text-[#9997a5] line-through" : "font-medium text-[#29283a]"
+          }`}
+          title={item.title}
+        >
+          {item.title || "(nimetön)"}
+        </p>
+        <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[11px]">
+          {board && (
+            <span className="inline-flex max-w-36 items-center gap-1 truncate text-[#6e6c7d]">
+              <span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: board.color }} />
+              <span className="truncate">{board.name}</span>
+            </span>
+          )}
+          {status && (
             <span
-              className="size-2 shrink-0 rounded-full"
-              style={{ backgroundColor: board.color }}
-            />
-            <span className="truncate">{board.name}</span>
-          </span>
-        )}
-        {status && (
-          <span
-            className="rounded-md px-2 py-0.5 text-[11px] font-semibold text-white"
-            style={{ backgroundColor: status.color }}
-          >
-            {status.label}
-          </span>
-        )}
-      </span>
-      {actions && <span className="flex w-full items-center gap-1 pl-8 sm:w-auto sm:pl-0">{actions}</span>}
+              className="rounded px-1.5 py-px font-semibold text-white"
+              style={{ backgroundColor: status.color }}
+            >
+              {status.label}
+            </span>
+          )}
+          {severity && (
+            <span
+              className="rounded border px-1.5 py-px font-semibold"
+              style={{ borderColor: severity.color, color: severity.color }}
+            >
+              {severity.label}
+            </span>
+          )}
+          {due && <span className="text-[#6e6c7d]">DL {shortDateFi(due)}</span>}
+          {archived && (
+            <span className="rounded bg-[#f2f2f7] px-1.5 py-px font-semibold text-[#6e6c7d]">
+              arkistoitu
+            </span>
+          )}
+          {badge && (
+            <span
+              className={`rounded px-1.5 py-px font-semibold ${
+                badge.tone === "warn"
+                  ? "bg-[#fff4e5] text-[#a35f00]"
+                  : "bg-[#f2f2f7] text-[#6e6c7d]"
+              }`}
+            >
+              {badge.text}
+            </span>
+          )}
+        </div>
+      </div>
+      {!dragging && (
+        <button
+          type="button"
+          disabled={busy}
+          onPointerDown={(event) => event.stopPropagation()}
+          onMouseDown={(event) => event.stopPropagation()}
+          onTouchStart={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            onArchive(item, !archived);
+          }}
+          aria-label={archived ? "Palauta arkistosta" : "Arkistoi"}
+          title={archived ? "Palauta arkistosta" : "Arkistoi"}
+          className={`-mr-1 -mt-0.5 grid size-7 shrink-0 place-items-center rounded-md text-[#9997a5] hover:bg-[#f2f2f7] hover:text-[#29283a] disabled:opacity-50 ${
+            archived ? "" : "sm:opacity-0 sm:group-hover/card:opacity-100 sm:focus-visible:opacity-100"
+          }`}
+        >
+          {archived ? <ArchiveRestore size={15} /> : <Archive size={15} />}
+        </button>
+      )}
+    </div>
+  );
+}
+
+export function DraggableCard(props: CardProps) {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id: props.item.id,
+  });
+  return (
+    <li
+      ref={setNodeRef}
+      {...attributes}
+      {...listeners}
+      onClick={() => props.onOpen?.(props.item)}
+      onKeyDown={(event) => {
+        if (event.target === event.currentTarget && event.key === "Enter") props.onOpen?.(props.item);
+      }}
+      className={`cursor-grab list-none outline-none focus-visible:ring-2 focus-visible:ring-[#6c63ff] rounded-xl ${
+        isDragging ? "opacity-30" : ""
+      }`}
+    >
+      <ItemCard {...props} />
     </li>
   );
 }
 
-export function QuickAction({
+export function KanbanColumn({
+  id,
+  title,
+  subtitle,
+  count,
+  warn,
+  className = "",
+  onAdd,
+  addForm,
   children,
-  onClick,
-  disabled,
 }: {
-  children: ReactNode;
-  onClick: () => void;
-  disabled?: boolean;
+  id: ColumnId;
+  title: string;
+  subtitle?: string;
+  count: string;
+  warn?: boolean;
+  className?: string;
+  onAdd: () => void;
+  addForm?: React.ReactNode;
+  children: React.ReactNode;
 }) {
+  const { setNodeRef, isOver } = useDroppable({ id });
   return (
-    <button
-      type="button"
-      disabled={disabled}
-      onClick={onClick}
-      className="rounded-md border border-[#e4e3eb] bg-white px-2 py-0.5 text-[11px] font-semibold text-[#6e6c7d] hover:border-[#6c63ff] hover:text-[#6c63ff] disabled:opacity-50"
+    <section
+      ref={setNodeRef}
+      className={`flex min-w-0 flex-col rounded-2xl border p-3 transition-colors lg:max-h-[calc(100vh-13rem)] ${
+        isOver ? "border-[#6c63ff] bg-[#f3f2ff]" : "border-[#e5e5ec] bg-[#efeff4]"
+      } ${className}`}
     >
-      {children}
-    </button>
+      <header className="mb-2 flex items-center gap-2 px-1">
+        <h2 className="text-xs font-bold uppercase tracking-[0.12em] text-[#4a4858]">{title}</h2>
+        {subtitle && <span className="text-[11px] text-[#9997a5]">{subtitle}</span>}
+        <span
+          className={`rounded-md px-1.5 py-0.5 text-[11px] font-semibold ${
+            warn ? "bg-[#fff4e5] text-[#a35f00]" : "bg-white text-[#6e6c7d]"
+          }`}
+        >
+          {count}
+        </span>
+        <button
+          type="button"
+          onClick={onAdd}
+          aria-label={`Lisää: ${title}`}
+          className="ml-auto grid size-7 place-items-center rounded-lg text-[#6c63ff] hover:bg-white"
+        >
+          <Plus size={17} />
+        </button>
+      </header>
+      {addForm}
+      <ul className="min-h-24 flex-1 space-y-2 overflow-y-auto px-0.5 pb-1">{children}</ul>
+    </section>
   );
 }
 
-/** "+ Lisää tälle päivälle": pull from the week list, or quick-add to Inbox. */
-export function AddForToday({
-  candidates,
-  boardsById,
-  canQuickAdd,
-  onPull,
-  onQuickAdd,
+export function AddForm({
+  boards,
+  defaultBoardId,
+  onCreate,
+  onClose,
 }: {
-  candidates: FrontItem[];
-  boardsById: Map<string, FrontBoard>;
-  canQuickAdd: boolean;
-  onPull: (item: FrontItem) => void;
-  onQuickAdd: (title: string) => Promise<boolean>;
+  boards: FrontBoard[];
+  defaultBoardId: string;
+  onCreate: (title: string, boardId: string) => Promise<boolean>;
+  onClose: () => void;
 }) {
-  const [open, setOpen] = useState(false);
   const [title, setTitle] = useState("");
+  const [boardId, setBoardId] = useState(defaultBoardId);
   const [adding, setAdding] = useState(false);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
     const value = title.trim();
-    if (!value || adding) return;
+    if (!value || adding || !boardId) return;
     setAdding(true);
-    const ok = await onQuickAdd(value);
+    const ok = await onCreate(value, boardId);
     setAdding(false);
     if (ok) setTitle("");
   }
 
-  if (!open) {
-    return (
-      <button
-        type="button"
-        className="mt-2 inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm font-semibold text-[#6c63ff] hover:bg-[#f3f2ff]"
-        onClick={() => setOpen(true)}
-      >
-        <Plus size={16} /> Lisää tälle päivälle
-      </button>
-    );
-  }
-
   return (
-    <div className="mt-3 rounded-xl border border-[#e4e3eb] bg-[#fafafd] p-3">
-      <div className="mb-2 flex items-center justify-between">
-        <span className="text-xs font-bold uppercase tracking-wide text-[#8b8998]">
-          Lisää tälle päivälle
-        </span>
+    <form
+      onSubmit={submit}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") onClose();
+      }}
+      className="mb-2 rounded-xl border border-[#6c63ff] bg-white p-2 shadow-sm"
+    >
+      <input
+        className="mb-2 h-8 w-full rounded-md px-1.5 text-sm outline-none"
+        placeholder="Uusi tehtävä…"
+        value={title}
+        autoFocus
+        onChange={(event) => setTitle(event.target.value)}
+      />
+      <div className="flex items-center gap-1.5">
+        <select
+          className="h-8 min-w-0 flex-1 rounded-md border border-[#e4e3eb] bg-white px-1.5 text-xs outline-none focus:border-[#6c63ff]"
+          value={boardId}
+          onChange={(event) => setBoardId(event.target.value)}
+          aria-label="Taulu"
+        >
+          {boards.map((board) => (
+            <option key={board.id} value={board.id}>
+              {board.name}
+            </option>
+          ))}
+        </select>
+        <button
+          type="submit"
+          disabled={!title.trim() || adding || !boardId}
+          className="h-8 rounded-md bg-[#6c63ff] px-3 text-xs font-semibold text-white hover:bg-[#5a52e0] disabled:opacity-50"
+        >
+          Lisää
+        </button>
         <button
           type="button"
-          className="rounded-md p-1 text-[#8b8998] hover:bg-[#eeeef4]"
-          onClick={() => setOpen(false)}
+          onClick={onClose}
           aria-label="Sulje"
+          className="grid size-8 place-items-center rounded-md text-[#8b8998] hover:bg-[#f2f2f7]"
         >
           <X size={14} />
         </button>
       </div>
-      {canQuickAdd && (
-        <form onSubmit={submit} className="mb-3 flex gap-2">
-          <input
-            className="h-9 min-w-0 flex-1 rounded-lg border border-[#e4e3eb] bg-white px-3 text-sm outline-none focus:border-[#6c63ff]"
-            placeholder="Uusi tehtävä Inboxiin tälle päivälle…"
-            value={title}
-            autoFocus
-            onChange={(event) => setTitle(event.target.value)}
-          />
-          <button
-            type="submit"
-            disabled={!title.trim() || adding}
-            className="rounded-lg bg-[#6c63ff] px-3 text-sm font-semibold text-white hover:bg-[#5a52e0] disabled:opacity-50"
-          >
-            Lisää
-          </button>
-        </form>
-      )}
-      {candidates.length > 0 ? (
-        <>
-          <p className="mb-1 text-xs text-[#8b8998]">Viikon listalta:</p>
-          <ul className="max-h-56 space-y-0.5 overflow-y-auto">
-            {candidates.map((item) => {
-              const board = boardsById.get(item.board_id);
-              return (
-                <li key={item.id}>
-                  <button
-                    type="button"
-                    className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm hover:bg-white"
-                    onClick={() => onPull(item)}
-                  >
-                    <Plus size={14} className="shrink-0 text-[#6c63ff]" />
-                    <span className="min-w-0 flex-1 truncate">{item.title}</span>
-                    {board && (
-                      <span className="inline-flex items-center gap-1 text-xs text-[#8b8998]">
-                        <span
-                          className="size-2 rounded-full"
-                          style={{ backgroundColor: board.color }}
-                        />
-                        {board.name}
-                      </span>
-                    )}
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-        </>
-      ) : (
-        <p className="text-xs text-[#9997a5]">Viikon listalla ei ole muita avoimia tehtäviä.</p>
-      )}
-    </div>
+    </form>
   );
 }

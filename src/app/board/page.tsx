@@ -20,7 +20,7 @@ export default async function BoardPage({
       supabase.from("docs").select("*").order("position").order("created_at"),
       supabase.from("board_groups").select("*").order("position"),
       supabase.from("board_columns").select("*").order("position"),
-      supabase.from("items").select("*").order("position"),
+      supabase.from("items").select("*").is("archived_at", null).order("position"),
       supabase.from("board_automations").select("*").order("created_at"),
     ]);
 

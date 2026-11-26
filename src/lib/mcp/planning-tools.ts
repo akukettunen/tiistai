@@ -9,8 +9,6 @@ import {
   isoDate,
   loadContext,
   owned,
-  parseTimestamp,
-  timestampInput,
   uuid,
   type ItemRow,
 } from "@/lib/mcp/common";
@@ -18,96 +16,18 @@ import {
   IN_PROGRESS_LIMIT,
   WEEK_ITEM_LIMIT,
   addDays,
-  blockHours,
-  helsinkiDate,
-  helsinkiTime,
-  helsinkiToUtc,
   isDone,
   isInProgress,
   isoWeekNumber,
   todayIso,
-  weekRangeUtc,
   weekStart,
   type LabelOption,
   type PlanningColumn,
-  type TimeBlock,
 } from "@/lib/planning";
 
-const blockKind = z.enum(["focus", "free_coding", "admin", "other"]);
 const color = z.string().max(32);
 const columnRole = z.enum(["status", "severity", "due_date"]);
 const optionState = z.enum(["done", "in_progress"]);
-
-const BLOCK_FIELDS =
-  "id, title, kind, starts_at, ends_at, board_id, item_id, note_before, note_after, done_at";
-
-type BlockRow = Pick<
-  TimeBlock,
-  | "id"
-  | "title"
-  | "kind"
-  | "starts_at"
-  | "ends_at"
-  | "board_id"
-  | "item_id"
-  | "note_before"
-  | "note_after"
-  | "done_at"
->;
-
-function describeBlock(block: BlockRow) {
-  return {
-    ...block,
-    date: helsinkiDate(block.starts_at),
-    start: helsinkiTime(block.starts_at),
-    end: helsinkiTime(block.ends_at),
-    hours: Math.round(blockHours(block) * 100) / 100,
-  };
-}
-
-/** Time blocks overlapping the UTC range [start, end). */
-async function blocksBetween(ownerId: string, start: string, end: string) {
-  const { data, error } = await db()
-    .from("time_blocks")
-    .select(BLOCK_FIELDS)
-    .eq("owner_id", ownerId)
-    .lt("starts_at", end)
-    .gt("ends_at", start)
-    .order("starts_at");
-  throwDb(error);
-  return (data ?? []) as BlockRow[];
-}
-
-function dayRangeUtc(date: string) {
-  return {
-    start: helsinkiToUtc(date, "00:00").toISOString(),
-    end: helsinkiToUtc(addDays(date, 1), "00:00").toISOString(),
-  };
-}
-
-
-async function readBlock(ownerId: string, id: string) {
-  const { data, error } = await db()
-    .from("time_blocks")
-    .select(BLOCK_FIELDS)
-    .eq("id", id)
-    .eq("owner_id", ownerId)
-    .single();
-  throwDb(error);
-  return describeBlock(data as BlockRow);
-}
-
-/** Validates board/item ownership for a block and fills board_id from the item when missing. */
-async function blockLinks(ownerId: string, boardId: string | null | undefined, itemId: string | null | undefined) {
-  let board = boardId;
-  if (itemId) {
-    const item = await owned<{ board_id: string }>(ownerId, "items", itemId);
-    if (board && board !== item.board_id) throw new Error("item_id does not belong to board_id");
-    if (board === undefined) board = item.board_id;
-  }
-  if (board) await owned(ownerId, "boards", board);
-  return { board_id: board, item_id: itemId };
-}
 
 /** Moves `id` to `position` among `rows` (sorted by position) and rewrites positions 0..n-1. */
 async function reorder(table: string, ownerId: string, rows: { id: string }[], id: string, position: number) {
@@ -128,7 +48,7 @@ export function registerPlanningTools(server: McpServer, ownerId: string) {
     {
       title: "Get today",
       description:
-        "Today's plan (Europe/Helsinki date): items planned for today, left-over undone items (planned earlier this week or for last week), and today's time blocks.",
+        "Today's plan (Europe/Helsinki date): items planned for today, left-over undone items (planned earlier this week or for last week).",
       inputSchema: z.object({}).strict(),
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
@@ -136,17 +56,16 @@ export function registerPlanningTools(server: McpServer, ownerId: string) {
       const today = todayIso();
       const monday = weekStart(today);
       const lastMonday = addDays(monday, -7);
-      const range = dayRangeUtc(today);
-      const [ctx, planned, leftover, blocks] = await Promise.all([
+      const [ctx, planned, leftover] = await Promise.all([
         loadContext(ownerId),
-        db().from("items").select(ITEM_FIELDS).eq("owner_id", ownerId).eq("planned_day", today).order("position"),
+        db().from("items").select(ITEM_FIELDS).eq("owner_id", ownerId).is("archived_at", null).eq("planned_day", today).order("position"),
         db()
           .from("items")
           .select(ITEM_FIELDS)
           .eq("owner_id", ownerId)
+          .is("archived_at", null)
           .or(`and(planned_day.gte.${monday},planned_day.lt.${today}),planned_week.eq.${lastMonday}`)
           .order("planned_day", { ascending: true, nullsFirst: false }),
-        blocksBetween(ownerId, range.start, range.end),
       ]);
       throwDb(planned.error);
       throwDb(leftover.error);
@@ -160,7 +79,6 @@ export function registerPlanningTools(server: McpServer, ownerId: string) {
         iso_week: isoWeekNumber(today),
         planned: plannedItems.map((item) => describeItem(item, ctx)),
         leftover: leftoverItems.map((item) => describeItem(item, ctx)),
-        time_blocks: blocks.map(describeBlock),
       });
     },
   );
@@ -169,7 +87,7 @@ export function registerPlanningTools(server: McpServer, ownerId: string) {
     "get_week",
     {
       title: "Get week",
-      description: `Week plan (Europe/Helsinki): items with planned_week = week, time blocks, in-progress counts per active board, free-coding hours (reserved vs done), open Inbox count, and warnings (> ${WEEK_ITEM_LIMIT} planned items, > ${IN_PROGRESS_LIMIT} in progress on a board).`,
+      description: `Week plan (Europe/Helsinki): items with planned_week = week, in-progress counts per active board, open Inbox count, and warnings (> ${WEEK_ITEM_LIMIT} planned items, > ${IN_PROGRESS_LIMIT} in progress on a board).`,
       inputSchema: z
         .object({
           week: isoDate.optional().describe("Any date in the week (normalised to Monday); default this week"),
@@ -179,14 +97,12 @@ export function registerPlanningTools(server: McpServer, ownerId: string) {
     },
     async ({ week }) => {
       const monday = weekStart(week ?? todayIso());
-      const range = weekRangeUtc(monday);
       const ctx = await loadContext(ownerId);
       const activeBoards = [...ctx.boards.values()].filter((b) => !b.archived_at);
       const activeIds = activeBoards.map((b) => b.id);
 
-      const [planned, blocks, boardItems] = await Promise.all([
-        db().from("items").select(ITEM_FIELDS).eq("owner_id", ownerId).eq("planned_week", monday).order("planned_day"),
-        blocksBetween(ownerId, range.start, range.end),
+      const [planned, boardItems] = await Promise.all([
+        db().from("items").select(ITEM_FIELDS).eq("owner_id", ownerId).is("archived_at", null).eq("planned_week", monday).order("planned_day"),
         activeIds.length
           ? fetchAll<Pick<ItemRow, "id" | "board_id" | "column_values">>(
               (from, to) =>
@@ -194,6 +110,7 @@ export function registerPlanningTools(server: McpServer, ownerId: string) {
                   .from("items")
                   .select("id, board_id, column_values")
                   .eq("owner_id", ownerId)
+                  .is("archived_at", null)
                   .in("board_id", activeIds)
                   .order("id")
                   .range(from, to) as never,
@@ -213,8 +130,6 @@ export function registerPlanningTools(server: McpServer, ownerId: string) {
         };
       });
 
-      const freeCoding = blocks.filter((b) => b.kind === "free_coding");
-      const round = (n: number) => Math.round(n * 100) / 100;
       const inbox = boards.find((b) => b.board_name.trim().toLowerCase() === "inbox");
 
       const warnings: string[] = [];
@@ -232,13 +147,7 @@ export function registerPlanningTools(server: McpServer, ownerId: string) {
         iso_week: isoWeekNumber(monday),
         items,
         items_done: items.filter((i) => i.done).length,
-        time_blocks: blocks.map(describeBlock),
         boards: boards.filter((b) => b.in_progress > 0 || b.open > 0),
-        free_coding: {
-          sessions: freeCoding.length,
-          reserved_hours: round(freeCoding.reduce((sum, b) => sum + blockHours(b), 0)),
-          done_hours: round(freeCoding.filter((b) => b.done_at).reduce((sum, b) => sum + blockHours(b), 0)),
-        },
         inbox_open: inbox?.open ?? null,
         warnings,
       });
@@ -281,116 +190,6 @@ export function registerPlanningTools(server: McpServer, ownerId: string) {
         .single();
       throwDb(error);
       return ok(describeItem(data as unknown as ItemRow, await loadContext(ownerId)));
-    },
-  );
-
-  server.registerTool(
-    "create_time_block",
-    {
-      title: "Create time block",
-      description:
-        "Create a time block (focus / free_coding / admin / other). Times without an offset are Helsinki local time.",
-      inputSchema: z
-        .object({
-          title: z.string().max(240).default(""),
-          kind: blockKind.default("focus"),
-          starts_at: timestampInput,
-          ends_at: timestampInput,
-          board_id: uuid.nullable().optional().describe("Defaults to the item's board when item_id is given"),
-          item_id: uuid.nullable().optional(),
-          note_before: z.string().max(10000).default(""),
-        })
-        .strict(),
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-    },
-    async (input) => {
-      const starts = parseTimestamp(input.starts_at, "starts_at");
-      const ends = parseTimestamp(input.ends_at, "ends_at");
-      if (ends <= starts) return fail("ends_at must be after starts_at.");
-      const links = await blockLinks(ownerId, input.board_id, input.item_id);
-      const { data, error } = await db()
-        .from("time_blocks")
-        .insert({
-          owner_id: ownerId,
-          title: input.title.trim(),
-          kind: input.kind,
-          starts_at: starts,
-          ends_at: ends,
-          board_id: links.board_id ?? null,
-          item_id: links.item_id ?? null,
-          note_before: input.note_before,
-        })
-        .select("id")
-        .single();
-      throwDb(error);
-      const { id } = data as { id: string };
-      return ok({ block: await readBlock(ownerId, id) });
-    },
-  );
-
-  server.registerTool(
-    "update_time_block",
-    {
-      title: "Update time block",
-      description:
-        "Update a time block. Times without an offset are Helsinki local time. done=true marks it done (sets done_at), done=false clears it.",
-      inputSchema: z
-        .object({
-          block_id: uuid,
-          title: z.string().max(240).optional(),
-          kind: blockKind.optional(),
-          starts_at: timestampInput.optional(),
-          ends_at: timestampInput.optional(),
-          board_id: uuid.nullable().optional(),
-          item_id: uuid.nullable().optional(),
-          note_before: z.string().max(10000).optional(),
-          note_after: z.string().max(10000).optional(),
-          done: z.boolean().optional(),
-        })
-        .strict(),
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    },
-    async ({ block_id, ...patch }) => {
-      const block = await owned<TimeBlock>(ownerId, "time_blocks", block_id);
-      const values: Record<string, unknown> = {};
-      if (patch.title !== undefined) values.title = patch.title.trim();
-      if (patch.kind !== undefined) values.kind = patch.kind;
-      if (patch.note_before !== undefined) values.note_before = patch.note_before;
-      if (patch.note_after !== undefined) values.note_after = patch.note_after;
-      if (patch.done !== undefined) values.done_at = patch.done ? (block.done_at ?? new Date().toISOString()) : null;
-      if (patch.starts_at !== undefined) values.starts_at = parseTimestamp(patch.starts_at, "starts_at");
-      if (patch.ends_at !== undefined) values.ends_at = parseTimestamp(patch.ends_at, "ends_at");
-      const starts = new Date((values.starts_at as string | undefined) ?? block.starts_at).getTime();
-      const ends = new Date((values.ends_at as string | undefined) ?? block.ends_at).getTime();
-      if (ends <= starts) return fail("ends_at must be after starts_at.");
-      if (patch.board_id !== undefined || patch.item_id !== undefined) {
-        const itemId = patch.item_id !== undefined ? patch.item_id : block.item_id;
-        const boardId = patch.board_id !== undefined ? patch.board_id : patch.item_id ? undefined : block.board_id;
-        const links = await blockLinks(ownerId, boardId, itemId);
-        values.board_id = links.board_id ?? null;
-        values.item_id = links.item_id ?? null;
-      }
-      if (!Object.keys(values).length) return fail("No fields to update.");
-      values.updated_at = new Date().toISOString();
-      const { error } = await db().from("time_blocks").update(values).eq("id", block_id).eq("owner_id", ownerId);
-      throwDb(error);
-      return ok({ block: await readBlock(ownerId, block_id) });
-    },
-  );
-
-  server.registerTool(
-    "delete_time_block",
-    {
-      title: "Delete time block",
-      description: "Delete a time block. Requires confirm=true.",
-      inputSchema: z.object({ block_id: uuid, confirm: z.literal(true) }).strict(),
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-    },
-    async ({ block_id }) => {
-      await owned(ownerId, "time_blocks", block_id);
-      const { error } = await db().from("time_blocks").delete().eq("id", block_id).eq("owner_id", ownerId);
-      throwDb(error);
-      return ok({ deleted: block_id });
     },
   );
 

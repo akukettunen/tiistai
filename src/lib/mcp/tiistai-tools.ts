@@ -111,6 +111,7 @@ export function registerTiistaiTools(server: McpServer, ownerId: string) {
           planned_week: isoDate.optional().describe("Any date in the week (normalised to Monday)"),
           planned_day: isoDate.optional(),
           include_archived_boards: z.boolean().default(false),
+          include_archived_items: z.boolean().default(false).describe("Include items that were archived"),
           limit: z.number().int().min(1).max(200).default(50),
         })
         .strict(),
@@ -125,6 +126,7 @@ export function registerTiistaiTools(server: McpServer, ownerId: string) {
           .select(ITEM_FIELDS)
           .eq("owner_id", ownerId)
           .order("updated_at", { ascending: false });
+        if (!input.include_archived_items) q = q.is("archived_at", null);
         if (input.board_id) q = q.eq("board_id", input.board_id);
         if (input.group_id) q = q.eq("group_id", input.group_id);
         if (input.planned_week) q = q.eq("planned_week", weekStart(input.planned_week));
@@ -249,6 +251,7 @@ export function registerTiistaiTools(server: McpServer, ownerId: string) {
           planned_day: plannedDayInput.optional(),
           planned_week: plannedWeekInput.optional(),
           group_id: uuid.optional(),
+          archived: z.boolean().optional().describe("true archives the item (hidden from boards, Etusivu and searches), false restores it"),
           column_values: z.record(z.string(), z.unknown()).optional().describe("Raw values keyed by column id"),
           merge_column_values: z
             .boolean()
@@ -264,6 +267,7 @@ export function registerTiistaiTools(server: McpServer, ownerId: string) {
 
       const values: Record<string, unknown> = {};
       if (patch.title !== undefined) values.title = patch.title.trim();
+      if (patch.archived !== undefined) values.archived_at = patch.archived ? (item.archived_at ?? new Date().toISOString()) : null;
       if (patch.description !== undefined) values.description = patch.description;
       if (patch.planned_day !== undefined) values.planned_day = patch.planned_day;
       if (patch.planned_week !== undefined) {

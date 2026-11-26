@@ -1,206 +1,258 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import {
-  AlertTriangle,
-  ChevronLeft,
-  ChevronRight,
-  Inbox,
-  X,
-} from "lucide-react";
+  DndContext,
+  DragOverlay,
+  MouseSensor,
+  TouchSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+  type DragStartEvent,
+} from "@dnd-kit/core";
+import { Archive, ChevronRight, Eye, EyeOff, Inbox, Search, X } from "lucide-react";
 import { AppTopBar } from "@/components/app-top-bar";
 import { createClient } from "@/lib/supabase/client";
 import {
-  IN_PROGRESS_LIMIT,
   WEEK_ITEM_LIMIT,
   addDays,
-  blockHours,
   doneValuePatch,
-  helsinkiDate,
-  helsinkiTime,
-  helsinkiToUtc,
   isDone,
   isoWeekNumber,
-  weekRangeUtc,
+  roleOption,
   weekStart,
-  type TimeBlock,
 } from "@/lib/planning";
-import { BlockDialog } from "./block-dialog";
-import { AddForToday, ItemRow, QuickAction } from "./item-list";
-import { loadWeekItems, loadWeekSchedule } from "./queries";
-import { TodayTimeline } from "./today-timeline";
+import { ItemPanel, type PanelPatch } from "./item-panel";
+import {
+  AddForm,
+  DraggableCard,
+  ItemCard,
+  KanbanColumn,
+  type ColumnId,
+} from "./item-list";
 import {
   ITEM_FIELDS,
-  formatHours,
   isInboxBoard,
-  isProductBoard,
-  minutesToTime,
   shortDateFi,
-  timeToMinutes,
   weekdayFi,
-  type BlockDraft,
   type FrontItem,
   type FrontPageData,
 } from "./types";
-import { WeekStrip } from "./week-strip";
 
-// ---------------------------------------------------------------------------
-// Pure state helpers
-// ---------------------------------------------------------------------------
+type ItemPatch = PanelPatch;
+type UndoEntry = { label: string; undo: () => Promise<void> };
+type Toast = { message: string; undoable: boolean };
+type Filters = { text: string; board: string; status: string; severity: string };
 
-function inWeek(iso: string, monday: string) {
-  const { start, end } = weekRangeUtc(monday);
-  const t = new Date(iso).getTime();
-  return t >= new Date(start).getTime() && t < new Date(end).getTime();
+const UNDO_LIMIT = 30;
+const EMPTY_FILTERS: Filters = { text: "", board: "", status: "", severity: "" };
+
+function isTypingTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+  return target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
 }
-
-/** Replace everything that starts in `monday`'s week with `incoming`. */
-function mergeWeek<T extends { id: string; starts_at: string }>(
-  current: T[],
-  incoming: T[],
-  monday: string,
-): T[] {
-  const ids = new Set(incoming.map((x) => x.id));
-  return [
-    ...current.filter((x) => !ids.has(x.id) && !inWeek(x.starts_at, monday)),
-    ...incoming,
-  ].sort((a, b) => a.starts_at.localeCompare(b.starts_at));
-}
-
-function mergeItems(current: FrontItem[], incoming: FrontItem[]) {
-  const map = new Map(current.map((i) => [i.id, i]));
-  for (const item of incoming) map.set(item.id, item);
-  return [...map.values()];
-}
-
-function upsertBlock(current: TimeBlock[], block: TimeBlock) {
-  return [...current.filter((b) => b.id !== block.id), block].sort((a, b) =>
-    a.starts_at.localeCompare(b.starts_at),
-  );
-}
-
-function draftFromBlock(block: TimeBlock): BlockDraft {
-  return {
-    id: block.id,
-    title: block.title,
-    kind: block.kind,
-    date: helsinkiDate(block.starts_at),
-    start: helsinkiTime(block.starts_at),
-    end: helsinkiTime(block.ends_at),
-    board_id: block.board_id,
-    item_id: block.item_id,
-    note_before: block.note_before,
-    note_after: block.note_after,
-    done_at: block.done_at,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Component
-// ---------------------------------------------------------------------------
 
 export function FrontPage({ data }: { data: FrontPageData }) {
   const supabase = useMemo(() => createClient(), []);
   const { today, columns, boards, groups, userId } = data;
-  const currentMonday = weekStart(today);
-  const lastMonday = addDays(currentMonday, -7);
+  const monday = weekStart(today);
+  const lastMonday = addDays(monday, -7);
 
   const [items, setItems] = useState(data.items);
-  const [blocks, setBlocks] = useState(data.blocks);
-  const [viewMonday, setViewMonday] = useState(currentMonday);
-  const [inboxOpenCount, setInboxOpenCount] = useState(data.inboxOpenCount);
   const [busyItems, setBusyItems] = useState<Set<string>>(new Set());
-  const [dialog, setDialog] = useState<{ key: string; draft: BlockDraft } | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [toast, setToast] = useState<string | null>(data.loadError);
+  const [toast, setToast] = useState<Toast | null>(
+    data.loadError ? { message: data.loadError, undoable: false } : null,
+  );
+  const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
+  const [showDone, setShowDone] = useState(false);
+  const [showArchived, setShowArchived] = useState(false);
+  const [adding, setAdding] = useState<ColumnId | null>(null);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [openId, setOpenId] = useState<string | null>(null);
+  const undoStack = useRef<UndoEntry[]>([]);
+  const toastTimer = useRef<number | undefined>(undefined);
 
   const boardsById = useMemo(() => new Map(boards.map((b) => [b.id, b])), [boards]);
+  const boardOrder = useMemo(() => new Map(boards.map((b, i) => [b.id, i])), [boards]);
   const inboxBoard = boards.find(isInboxBoard);
-  const inboxGroup = inboxBoard
-    ? groups
-        .filter((g) => g.board_id === inboxBoard.id)
-        .sort((a, b) => a.position - b.position)[0]
-    : undefined;
+  const defaultBoardId = inboxBoard?.id ?? boards[0]?.id ?? "";
+
+  const dndId = useId();
+  const sensors = useSensors(
+    useSensor(MouseSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 220, tolerance: 6 } }),
+  );
+
+  // -------------------------------------------------------------------------
+  // Toasts and undo
+  // -------------------------------------------------------------------------
+
+  function showToast(message: string, undoable = false) {
+    setToast({ message, undoable });
+    window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToast(null), undoable ? 6000 : 4000);
+  }
 
   function notify(message: string) {
-    setToast(message);
-    window.setTimeout(() => setToast((t) => (t === message ? null : t)), 4000);
+    showToast(message, false);
   }
 
-  function goToWeek(monday: string) {
-    setViewMonday(monday);
-    loadWeekSchedule(supabase, monday).then((schedule) => {
-      if (schedule.error) return notify(schedule.error);
-      setBlocks((current) => mergeWeek(current, schedule.blocks, monday));
-    });
-    loadWeekItems(supabase, monday).then(({ data: loaded, error }) => {
-      if (error) return notify(error);
-      setItems((current) => mergeItems(current, loaded));
+  function pushUndo(entry: UndoEntry) {
+    undoStack.current = [...undoStack.current.slice(-(UNDO_LIMIT - 1)), entry];
+    showToast(entry.label, true);
+  }
+
+  async function undoLast() {
+    const entry = undoStack.current.pop();
+    if (!entry) return notify("Ei kumottavaa");
+    await entry.undo();
+    showToast(`Kumottu: ${entry.label}`, undoStack.current.length > 0);
+  }
+
+  // Cmd+Z / Ctrl+Z undoes the latest front-page action (not while typing).
+  const undoRef = useRef(undoLast);
+  useEffect(() => {
+    undoRef.current = undoLast;
+  });
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.altKey) return;
+      if (event.key.toLowerCase() !== "z" || isTypingTarget(event.target)) return;
+      event.preventDefault();
+      void undoRef.current();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  // -------------------------------------------------------------------------
+  // Writes
+  // -------------------------------------------------------------------------
+
+  function setBusy(id: string, busy: boolean) {
+    setBusyItems((current) => {
+      const next = new Set(current);
+      if (busy) next.add(id);
+      else next.delete(id);
+      return next;
     });
   }
 
-  // -------------------------------------------------------------------------
-  // Items
-  // -------------------------------------------------------------------------
+  function upsertLocal(item: FrontItem) {
+    setItems((current) => current.map((i) => (i.id === item.id ? item : i)));
+  }
 
-  async function updateItem(item: FrontItem, patch: Partial<FrontItem>) {
-    setBusyItems((s) => new Set(s).add(item.id));
+  /** Adds the group move of a matching board automation when a column value changes. */
+  function withAutomation(item: FrontItem, patch: ItemPatch): ItemPatch {
+    if (!patch.column_values || patch.group_id) return patch;
+    const next = patch.column_values;
+    const rule = data.automations.find(
+      (a) =>
+        a.enabled &&
+        a.board_id === item.board_id &&
+        next[a.trigger_column_id] !== item.column_values?.[a.trigger_column_id] &&
+        String(next[a.trigger_column_id] ?? "") === a.trigger_value,
+    );
+    if (!rule || rule.target_group_id === item.group_id) return patch;
+    return { ...patch, group_id: rule.target_group_id };
+  }
+
+  /** Writes `patch` (optimistically); with `label`, records an undo entry. */
+  async function updateItem(item: FrontItem, rawPatch: ItemPatch, label?: string) {
+    const patch = withAutomation(item, rawPatch);
+    setBusy(item.id, true);
+    upsertLocal({ ...item, ...patch });
     const { data: row, error } = await supabase
       .from("items")
       .update({ ...patch, updated_at: new Date().toISOString() })
       .eq("id", item.id)
       .select(ITEM_FIELDS)
       .single();
-    setBusyItems((s) => {
-      const next = new Set(s);
-      next.delete(item.id);
-      return next;
-    });
+    setBusy(item.id, false);
     if (error || !row) {
+      upsertLocal(item);
       notify(error?.message ?? "Tallennus epäonnistui");
       return null;
     }
     const saved = row as FrontItem;
-    setItems((current) => current.map((i) => (i.id === saved.id ? saved : i)));
+    upsertLocal(saved);
+    if (label) {
+      const previous: ItemPatch = {};
+      for (const key of Object.keys(patch) as (keyof ItemPatch)[]) {
+        (previous as Record<string, unknown>)[key] = item[key];
+      }
+      // The DB trigger derives planned_week from planned_day, so restore both.
+      if ("planned_day" in patch || "planned_week" in patch) {
+        previous.planned_day = item.planned_day;
+        previous.planned_week = item.planned_week;
+      }
+      pushUndo({ label, undo: async () => void (await updateItem(saved, previous)) });
+    }
     return saved;
   }
 
-  async function toggleDone(item: FrontItem, done: boolean) {
+  function toggleDone(item: FrontItem, done: boolean) {
     const patch = doneValuePatch(item, columns, done);
     if (!patch) return notify("Taululla ei ole Status-saraketta");
-    const wasDone = isDone(item, columns);
-    const saved = await updateItem(item, { column_values: patch });
-    if (saved && inboxBoard && saved.board_id === inboxBoard.id) {
-      const nowDone = isDone(saved, columns);
-      if (nowDone !== wasDone) setInboxOpenCount((n) => n + (nowDone ? -1 : 1));
-    }
+    void updateItem(
+      item,
+      { column_values: patch },
+      done ? `Valmis: ${item.title}` : `Avattu: ${item.title}`,
+    );
   }
 
-  async function quickAdd(title: string) {
-    if (!inboxBoard || !inboxGroup) {
-      notify("Inbox-taulua ei löytynyt");
+  function archiveItem(item: FrontItem, archived: boolean) {
+    void updateItem(
+      item,
+      { archived_at: archived ? new Date().toISOString() : null },
+      archived ? `Arkistoitu: ${item.title}` : `Palautettu arkistosta: ${item.title}`,
+    );
+  }
+
+  async function deleteItem(item: FrontItem) {
+    if (!window.confirm(`Poistetaanko “${item.title}” pysyvästi? Tätä ei voi kumota.`)) return;
+    const { error } = await supabase.from("items").delete().eq("id", item.id);
+    if (error) return notify(error.message);
+    setOpenId(null);
+    setItems((current) => current.filter((i) => i.id !== item.id));
+    notify(`Poistettu: ${item.title}`);
+  }
+
+  function planFor(column: ColumnId): ItemPatch {
+    if (column === "today") return { planned_day: today, planned_week: monday };
+    if (column === "week") return { planned_day: null, planned_week: monday };
+    return { planned_day: null, planned_week: null };
+  }
+
+  async function createItem(title: string, boardId: string, column: ColumnId) {
+    const group = groups
+      .filter((g) => g.board_id === boardId)
+      .sort((a, b) => a.position - b.position)[0];
+    if (!group) {
+      notify("Taululla ei ole ryhmää");
       return false;
     }
     const { data: last } = await supabase
       .from("items")
       .select("position")
-      .eq("group_id", inboxGroup.id)
+      .eq("group_id", group.id)
       .order("position", { ascending: false })
       .limit(1)
       .maybeSingle();
     const columnValues =
-      doneValuePatch({ board_id: inboxBoard.id, column_values: {} }, columns, false) ?? {};
+      doneValuePatch({ board_id: boardId, column_values: {} }, columns, false) ?? {};
     const { data: row, error } = await supabase
       .from("items")
       .insert({
         title,
-        board_id: inboxBoard.id,
-        group_id: inboxGroup.id,
+        board_id: boardId,
+        group_id: group.id,
         owner_id: userId,
         position: ((last?.position as number | undefined) ?? -1) + 1,
         column_values: columnValues,
-        planned_day: today,
+        ...planFor(column),
       })
       .select(ITEM_FIELDS)
       .single();
@@ -208,391 +260,355 @@ export function FrontPage({ data }: { data: FrontPageData }) {
       notify(error?.message ?? "Lisäys epäonnistui");
       return false;
     }
-    setItems((current) => [...current, row as FrontItem]);
-    setInboxOpenCount((n) => n + 1);
+    const created = row as FrontItem;
+    setItems((current) => [...current, created]);
+    pushUndo({
+      label: `Lisätty: ${title}`,
+      undo: async () => {
+        const { error: deleteError } = await supabase.from("items").delete().eq("id", created.id);
+        if (deleteError) return notify(deleteError.message);
+        setItems((current) => current.filter((i) => i.id !== created.id));
+      },
+    });
     return true;
   }
 
   // -------------------------------------------------------------------------
-  // Blocks
+  // Columns, filters, drag & drop
   // -------------------------------------------------------------------------
 
-  function openCreate(day: string, startMin: number) {
-    const start = Math.min(startMin, 23 * 60);
-    setDialog({
-      key: `new-${day}-${start}-${Date.now()}`,
-      draft: {
-        title: "",
-        kind: "focus",
-        date: day,
-        start: minutesToTime(start),
-        end: minutesToTime(Math.min(start + 60, 24 * 60 - 1)),
-        board_id: null,
-        item_id: null,
-        note_before: "",
-        note_after: "",
-        done_at: null,
-      },
-    });
+  function columnOf(item: FrontItem): ColumnId {
+    if (item.planned_day === today) return "today";
+    if (item.planned_week === monday) return "week";
+    if (item.planned_week === lastMonday && !isDone(item, columns)) return "week";
+    return "all";
   }
 
-  function openEdit(block: TimeBlock) {
-    setDialog({ key: block.id, draft: draftFromBlock(block) });
-  }
-
-  async function saveBlock(draft: BlockDraft) {
-    setSaving(true);
-    const row = {
-      title: draft.title.trim(),
-      kind: draft.kind,
-      starts_at: helsinkiToUtc(draft.date, draft.start).toISOString(),
-      ends_at: helsinkiToUtc(draft.date, draft.end).toISOString(),
-      board_id: draft.board_id,
-      item_id: draft.item_id,
-      note_before: draft.note_before,
-      note_after: draft.note_after,
-      done_at: draft.done_at,
-      updated_at: new Date().toISOString(),
-    };
-    const query = draft.id
-      ? supabase.from("time_blocks").update(row).eq("id", draft.id)
-      : supabase.from("time_blocks").insert({ ...row, owner_id: userId });
-    const { data: saved, error } = await query.select().single();
-    setSaving(false);
-    if (error || !saved) return notify(error?.message ?? "Tallennus epäonnistui");
-    setBlocks((current) => upsertBlock(current, saved as TimeBlock));
-    setDialog(null);
-  }
-
-  async function moveBlock(block: TimeBlock, day: string, deltaMin: number) {
-    const durationMs =
-      new Date(block.ends_at).getTime() - new Date(block.starts_at).getTime();
-    const durationMin = Math.round(durationMs / 60000);
-    const startMin = Math.max(
-      0,
-      Math.min(24 * 60 - durationMin, timeToMinutes(helsinkiTime(block.starts_at)) + deltaMin),
-    );
-    const start = helsinkiToUtc(day, minutesToTime(startMin));
-    const starts_at = start.toISOString();
-    const ends_at = new Date(start.getTime() + durationMs).toISOString();
-    if (starts_at === new Date(block.starts_at).toISOString()) return;
-
-    const optimistic = { ...block, starts_at, ends_at };
-    setBlocks((current) => upsertBlock(current, optimistic));
-    const { data: saved, error } = await supabase
-      .from("time_blocks")
-      .update({ starts_at, ends_at, updated_at: new Date().toISOString() })
-      .eq("id", block.id)
-      .select()
-      .single();
-    if (error || !saved) {
-      setBlocks((current) => upsertBlock(current, block));
-      return notify(error?.message ?? "Siirto epäonnistui");
+  function badgeFor(item: FrontItem): { text: string; tone?: "warn" | "muted" } | undefined {
+    const done = isDone(item, columns);
+    if (!done && item.planned_day && item.planned_day < today && item.planned_day >= lastMonday) {
+      return { text: `jäänyt · ${weekdayFi(item.planned_day)} ${shortDateFi(item.planned_day)}`, tone: "warn" };
     }
-    setBlocks((current) => upsertBlock(current, saved as TimeBlock));
+    if (!done && item.planned_week === lastMonday) {
+      return { text: `jäänyt · vko ${isoWeekNumber(lastMonday)}`, tone: "warn" };
+    }
+    if (item.planned_day && item.planned_day !== today) {
+      return { text: `${weekdayFi(item.planned_day)} ${shortDateFi(item.planned_day)}` };
+    }
+    if (item.planned_week && item.planned_week > monday) {
+      return { text: `vko ${isoWeekNumber(item.planned_week)}` };
+    }
+    return undefined;
   }
 
-  async function deleteBlock(blockId: string) {
-    setSaving(true);
-    const { error } = await supabase.from("time_blocks").delete().eq("id", blockId);
-    setSaving(false);
-    if (error) return notify(error.message);
-    setBlocks((current) => current.filter((b) => b.id !== blockId));
-    setDialog(null);
+  const statusLabels = useMemo(() => optionLabels(columns, "status"), [columns]);
+  const severityLabels = useMemo(() => optionLabels(columns, "severity"), [columns]);
+
+  const text = filters.text.trim().toLowerCase();
+  const filtered = items.filter((item) => {
+    const board = boardsById.get(item.board_id);
+    if (!board) return false;
+    if (!showArchived && item.archived_at) return false;
+    if (!showDone && isDone(item, columns)) return false;
+    if (filters.board && item.board_id !== filters.board) return false;
+    if (filters.status && roleOption(item, columns, "status")?.label !== filters.status) return false;
+    if (filters.severity && roleOption(item, columns, "severity")?.label !== filters.severity) return false;
+    if (text && !`${item.title} ${board.name}`.toLowerCase().includes(text)) return false;
+    return true;
+  });
+
+  const byColumn: Record<ColumnId, FrontItem[]> = { all: [], week: [], today: [] };
+  for (const item of filtered) byColumn[columnOf(item)].push(item);
+  const doneLast = (a: FrontItem, b: FrontItem) =>
+    Number(isDone(a, columns)) - Number(isDone(b, columns));
+  byColumn.today.sort((a, b) => doneLast(a, b) || a.position - b.position);
+  byColumn.week.sort(
+    (a, b) =>
+      doneLast(a, b) ||
+      Number(Boolean(badgeFor(b)?.tone)) - Number(Boolean(badgeFor(a)?.tone)) ||
+      (a.planned_day ?? "9999").localeCompare(b.planned_day ?? "9999") ||
+      a.position - b.position,
+  );
+  byColumn.all.sort(
+    (a, b) =>
+      doneLast(a, b) ||
+      (boardOrder.get(a.board_id) ?? 0) - (boardOrder.get(b.board_id) ?? 0) ||
+      a.position - b.position,
+  );
+
+  // Week count for the limit, independent of filters.
+  const weekPlanned = items.filter(
+    (i) => boardsById.has(i.board_id) && !i.archived_at && i.planned_week === monday,
+  ).length;
+  const inboxOpen = inboxBoard
+    ? items.filter((i) => i.board_id === inboxBoard.id && !i.archived_at && !isDone(i, columns))
+        .length
+    : 0;
+  const filtering = Boolean(filters.text || filters.board || filters.status || filters.severity);
+  const activeItem = activeId ? items.find((i) => i.id === activeId) : undefined;
+  const openItem = openId ? items.find((i) => i.id === openId) : undefined;
+
+  const closePanel = useCallback(() => setOpenId(null), []);
+
+  function handleDragStart(event: DragStartEvent) {
+    setActiveId(String(event.active.id));
   }
 
-  // -------------------------------------------------------------------------
-  // Derived data
-  // -------------------------------------------------------------------------
+  function handleDragEnd(event: DragEndEvent) {
+    setActiveId(null);
+    const item = items.find((i) => i.id === event.active.id);
+    const target = event.over?.id as ColumnId | undefined;
+    if (!item || !target || columnOf(item) === target) return;
+    const labels: Record<ColumnId, string> = {
+      all: "Poistettu suunnitelmasta",
+      week: "Siirretty tälle viikolle",
+      today: "Siirretty tälle päivälle",
+    };
+    void updateItem(item, planFor(target), `${labels[target]}: ${item.title}`);
+  }
 
-  const todayItems = items.filter((i) => i.planned_day === today);
-  const leftovers = items.filter(
-    (i) =>
-      !isDone(i, columns) &&
-      i.planned_day !== today &&
-      ((i.planned_day !== null && i.planned_day < today && i.planned_day >= currentMonday) ||
-        i.planned_week === lastMonday),
-  );
-  const pullCandidates = items.filter(
-    (i) => i.planned_week === currentMonday && i.planned_day !== today && !isDone(i, columns),
-  );
-  const weekList = items.filter((i) => i.planned_week === viewMonday);
-  const weekBlocks = blocks.filter((b) => inWeek(b.starts_at, viewMonday));
-  const freeCoding = weekBlocks.filter((b) => b.kind === "free_coding");
-  const freeTotal = freeCoding.reduce((sum, b) => sum + blockHours(b), 0);
-  const freeUsed = freeCoding
-    .filter((b) => b.done_at)
-    .reduce((sum, b) => sum + blockHours(b), 0);
-  const productBoards = boards.filter(isProductBoard);
-  const isCurrentWeek = viewMonday === currentMonday;
-  const viewWeekNumber = isoWeekNumber(viewMonday);
+  function renderCards(list: FrontItem[]) {
+    if (list.length === 0) {
+      return (
+        <li className="list-none px-2 py-6 text-center text-xs text-[#9997a5]">
+          {filtering ? "Ei osumia suodattimilla." : "Ei tehtäviä. Raahaa tähän tai lisää +."}
+        </li>
+      );
+    }
+    return list.map((item) => (
+      <DraggableCard
+        key={item.id}
+        item={item}
+        board={boardsById.get(item.board_id)}
+        columns={columns}
+        busy={busyItems.has(item.id)}
+        badge={badgeFor(item)}
+        onToggle={toggleDone}
+        onArchive={archiveItem}
+        onOpen={(i) => setOpenId(i.id)}
+      />
+    ));
+  }
+
+  function addFormFor(column: ColumnId) {
+    if (adding !== column) return undefined;
+    return (
+      <AddForm
+        boards={boards}
+        defaultBoardId={filters.board || defaultBoardId}
+        onCreate={(title, boardId) => createItem(title, boardId, column)}
+        onClose={() => setAdding(null)}
+      />
+    );
+  }
+
+  const selectClass =
+    "h-9 rounded-lg border border-[#e4e3eb] bg-white px-2 text-sm text-[#29283a] outline-none focus:border-[#6c63ff]";
 
   return (
     <div className="min-h-screen bg-[#f7f7fa] text-[#29283a]">
       <AppTopBar />
-      <main className="mx-auto w-full max-w-7xl px-4 py-6 md:px-7">
-        <header className="mb-6 flex flex-wrap items-end gap-x-4 gap-y-2">
+      <main className="mx-auto w-full max-w-[1500px] px-4 py-5 md:px-7">
+        <header className="mb-4 flex flex-wrap items-end gap-x-4 gap-y-3">
           <div>
             <h1 className="text-2xl font-bold tracking-tight">Etusivu</h1>
             <p className="text-sm text-[#8b8998]">
               vko {isoWeekNumber(today)} · {weekdayFi(today)} {shortDateFi(today)}
             </p>
           </div>
+          {inboxBoard && (
+            <Link
+              href={`/board?board=${inboxBoard.id}`}
+              className="ml-auto inline-flex items-center gap-2 rounded-xl border border-[#e4e3eb] bg-white px-3 py-2 text-sm hover:border-[#6c63ff]"
+            >
+              <Inbox size={16} className="text-[#6c63ff]" />
+              <span>
+                <span className="font-bold">{inboxOpen}</span> Inboxissa
+              </span>
+              <ChevronRight size={14} className="text-[#9997a5]" />
+            </Link>
+          )}
         </header>
 
-        {/* ------------------------------------------------------------ */}
-        <SectionTitle>Tänään</SectionTitle>
-        <div className="mb-8 grid gap-5 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]">
-          <Card title="Aikataulu">
-            <TodayTimeline
-              day={today}
-              blocks={blocks}
-              boardsById={boardsById}
-              onCreate={openCreate}
-              onEdit={openEdit}
+        <div className="mb-4 flex flex-wrap items-center gap-2">
+          <div className="relative min-w-48 flex-1 sm:max-w-72">
+            <Search
+              size={14}
+              className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#9997a5]"
             />
-          </Card>
-
-          <Card title="Tehtävät" aside={`${todayItems.filter((i) => isDone(i, columns)).length}/${todayItems.length}`}>
-            {todayItems.length === 0 ? (
-              <p className="px-2 text-sm text-[#9997a5]">Ei tehtäviä tälle päivälle.</p>
-            ) : (
-              <ul className="space-y-0.5">
-                {todayItems.map((item) => (
-                  <ItemRow
-                    key={item.id}
-                    item={item}
-                    board={boardsById.get(item.board_id)}
-                    columns={columns}
-                    busy={busyItems.has(item.id)}
-                    onToggle={toggleDone}
-                  />
-                ))}
-              </ul>
-            )}
-
-            <AddForToday
-              candidates={pullCandidates}
-              boardsById={boardsById}
-              canQuickAdd={Boolean(inboxBoard && inboxGroup)}
-              onPull={(item) => updateItem(item, { planned_day: today })}
-              onQuickAdd={quickAdd}
+            <input
+              className="h-9 w-full rounded-lg border border-[#e4e3eb] bg-white pl-8 pr-3 text-sm outline-none focus:border-[#6c63ff]"
+              placeholder="Suodata…"
+              value={filters.text}
+              onChange={(event) => setFilters({ ...filters, text: event.target.value })}
             />
-
-            {leftovers.length > 0 && (
-              <div className="mt-5">
-                <h3 className="mb-1 px-2 text-xs font-bold uppercase tracking-wide text-[#c27c0e]">
-                  Jäänyt aiemmin ({leftovers.length})
-                </h3>
-                <ul className="space-y-0.5">
-                  {leftovers.map((item) => {
-                    const busy = busyItems.has(item.id);
-                    return (
-                      <ItemRow
-                        key={item.id}
-                        item={item}
-                        board={boardsById.get(item.board_id)}
-                        columns={columns}
-                        busy={busy}
-                        onToggle={toggleDone}
-                        actions={
-                          <>
-                            <QuickAction
-                              disabled={busy}
-                              onClick={() => updateItem(item, { planned_day: today })}
-                            >
-                              Tänään
-                            </QuickAction>
-                            <QuickAction
-                              disabled={busy}
-                              onClick={() =>
-                                updateItem(item, {
-                                  planned_day: null,
-                                  planned_week: currentMonday,
-                                })
-                              }
-                            >
-                              Tälle viikolle
-                            </QuickAction>
-                            <QuickAction
-                              disabled={busy}
-                              onClick={() =>
-                                updateItem(item, { planned_day: null, planned_week: null })
-                              }
-                            >
-                              Poista
-                            </QuickAction>
-                          </>
-                        }
-                      />
-                    );
-                  })}
-                </ul>
-              </div>
-            )}
-          </Card>
-        </div>
-
-        {/* ------------------------------------------------------------ */}
-        <div className="mb-3 flex flex-wrap items-center gap-2">
-          <SectionTitle inline>
-            {isCurrentWeek ? "Tämä viikko" : `Viikko ${viewWeekNumber}`}
-          </SectionTitle>
-          <span className="text-xs text-[#9997a5]">
-            {shortDateFi(viewMonday)}–{shortDateFi(addDays(viewMonday, 6))}
-          </span>
-          <div className="ml-auto flex items-center gap-1">
-            {!isCurrentWeek && (
-              <button
-                type="button"
-                className="rounded-lg px-2 py-1 text-xs font-semibold text-[#6c63ff] hover:bg-[#f3f2ff]"
-                onClick={() => goToWeek(currentMonday)}
-              >
-                Tämä viikko
-              </button>
-            )}
-            <button
-              type="button"
-              className="rounded-lg p-1.5 text-[#6e6c7d] hover:bg-white"
-              aria-label="Edellinen viikko"
-              onClick={() => goToWeek(addDays(viewMonday, -7))}
-            >
-              <ChevronLeft size={18} />
-            </button>
-            <button
-              type="button"
-              className="rounded-lg p-1.5 text-[#6e6c7d] hover:bg-white"
-              aria-label="Seuraava viikko"
-              onClick={() => goToWeek(addDays(viewMonday, 7))}
-            >
-              <ChevronRight size={18} />
-            </button>
           </div>
-        </div>
-
-        <Card className="mb-5">
-          <WeekStrip
-            monday={viewMonday}
-            today={today}
-            blocks={weekBlocks}
-            onCreate={openCreate}
-            onEdit={openEdit}
-            onMove={moveBlock}
-          />
-          <p className="mt-2 text-[11px] text-[#9997a5]">
-            Klikkaa tyhjää kohtaa lisätäksesi blokin, raahaa blokkia siirtääksesi sitä (30 min välein).
-          </p>
-        </Card>
-
-        <div className="grid gap-5 lg:grid-cols-3">
-          <Card
-            title="Viikon lista"
-            aside={`${weekList.length}/${WEEK_ITEM_LIMIT}`}
-            warn={weekList.length > WEEK_ITEM_LIMIT}
+          <select
+            className={selectClass}
+            value={filters.board}
+            onChange={(event) => setFilters({ ...filters, board: event.target.value })}
+            aria-label="Taulu"
           >
-            {weekList.length > WEEK_ITEM_LIMIT && (
-              <p className="mb-2 flex items-center gap-1.5 rounded-lg bg-[#fff4e5] px-2 py-1.5 text-xs font-medium text-[#a35f00]">
-                <AlertTriangle size={14} /> Yli {WEEK_ITEM_LIMIT} tehtävää tälle viikolle.
-              </p>
-            )}
-            {weekList.length === 0 ? (
-              <p className="px-2 text-sm text-[#9997a5]">Viikon listalla ei ole tehtäviä.</p>
-            ) : (
-              <ul className="space-y-0.5">
-                {[...weekList]
-                  .sort((a, b) => Number(isDone(a, columns)) - Number(isDone(b, columns)))
-                  .map((item) => (
-                    <ItemRow
-                      key={item.id}
-                      item={item}
-                      board={boardsById.get(item.board_id)}
-                      columns={columns}
-                      busy={busyItems.has(item.id)}
-                      onToggle={toggleDone}
-                    />
-                  ))}
-              </ul>
-            )}
-          </Card>
-
-          <Card title="Koodi tällä viikolla">
-            <div className="mb-4 rounded-xl bg-[#e8f7f0] px-3 py-2.5">
-              <div className="text-xs font-semibold text-[#00754b]">Vapaat sessiot</div>
-              <div className="text-lg font-bold text-[#004d32]">
-                {formatHours(freeUsed)} / {formatHours(freeTotal)}{" "}
-                <span className="text-sm font-medium">käytetty</span>
-              </div>
-            </div>
-            {productBoards.length === 0 ? (
-              <p className="text-sm text-[#9997a5]">Ei tuotetauluja.</p>
-            ) : (
-              <ul className="space-y-2">
-                {productBoards.map((board) => {
-                  const inProgress = data.inProgressByBoard[board.id] ?? 0;
-                  const over = inProgress > IN_PROGRESS_LIMIT;
-                  const boardBlocks = freeCoding.filter((b) => b.board_id === board.id);
-                  return (
-                    <li key={board.id} className="flex items-center gap-2 text-sm">
-                      <span
-                        className="size-2.5 shrink-0 rounded-full"
-                        style={{ backgroundColor: board.color }}
-                      />
-                      <span className="min-w-0 flex-1 truncate font-medium">{board.name}</span>
-                      <span
-                        className={`rounded-md px-1.5 py-0.5 text-[11px] font-semibold ${
-                          over ? "bg-[#fdeef0] text-[#d83a52]" : "bg-[#f2f2f7] text-[#6e6c7d]"
-                        }`}
-                        title={`Kesken (raja ${IN_PROGRESS_LIMIT})`}
-                      >
-                        {over && <AlertTriangle size={11} className="mr-0.5 inline" />}
-                        {inProgress} kesken
-                      </span>
-                      <span className="w-20 text-right text-xs text-[#6e6c7d]">
-                        {formatBlockHours(boardBlocks)}
-                      </span>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </Card>
-
-          <Card title="Inbox">
-            {inboxBoard ? (
-              <Link
-                href={`/board?board=${inboxBoard.id}`}
-                className="flex items-center gap-3 rounded-xl border border-[#e4e3eb] px-3 py-3 hover:border-[#6c63ff]"
-              >
-                <Inbox size={20} className="text-[#6c63ff]" />
-                <span className="text-sm">
-                  <span className="text-lg font-bold">{inboxOpenCount}</span> käsittelemättä
-                </span>
-                <ChevronRight size={16} className="ml-auto text-[#9997a5]" />
-              </Link>
-            ) : (
-              <p className="text-sm text-[#9997a5]">Inbox-taulua ei löytynyt.</p>
-            )}
-          </Card>
+            <option value="">Kaikki taulut</option>
+            {boards.map((board) => (
+              <option key={board.id} value={board.id}>
+                {board.name}
+              </option>
+            ))}
+          </select>
+          <select
+            className={selectClass}
+            value={filters.status}
+            onChange={(event) => setFilters({ ...filters, status: event.target.value })}
+            aria-label="Status"
+          >
+            <option value="">Kaikki statukset</option>
+            {statusLabels.map((label) => (
+              <option key={label} value={label}>
+                {label}
+              </option>
+            ))}
+          </select>
+          <select
+            className={selectClass}
+            value={filters.severity}
+            onChange={(event) => setFilters({ ...filters, severity: event.target.value })}
+            aria-label="Prioriteetti"
+          >
+            <option value="">Kaikki prioriteetit</option>
+            {severityLabels.map((label) => (
+              <option key={label} value={label}>
+                {label}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            onClick={() => setShowDone((v) => !v)}
+            className={`inline-flex h-9 items-center gap-1.5 rounded-lg border px-3 text-sm font-medium ${
+              showDone
+                ? "border-[#6c63ff] bg-[#f3f2ff] text-[#5148df]"
+                : "border-[#e4e3eb] bg-white text-[#6e6c7d] hover:text-[#29283a]"
+            }`}
+          >
+            {showDone ? <Eye size={14} /> : <EyeOff size={14} />}
+            {showDone ? "Valmiit näkyvissä" : "Näytä valmiit"}
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowArchived((v) => !v)}
+            className={`inline-flex h-9 items-center gap-1.5 rounded-lg border px-3 text-sm font-medium ${
+              showArchived
+                ? "border-[#6c63ff] bg-[#f3f2ff] text-[#5148df]"
+                : "border-[#e4e3eb] bg-white text-[#6e6c7d] hover:text-[#29283a]"
+            }`}
+          >
+            <Archive size={14} />
+            {showArchived ? "Arkistoidut näkyvissä" : "Näytä arkistoidut"}
+          </button>
+          {filtering && (
+            <button
+              type="button"
+              onClick={() => setFilters(EMPTY_FILTERS)}
+              className="inline-flex h-9 items-center gap-1 rounded-lg px-2 text-sm font-medium text-[#6c63ff] hover:bg-[#f3f2ff]"
+            >
+              <X size={14} /> Tyhjennä
+            </button>
+          )}
         </div>
+
+        <DndContext
+          id={dndId}
+          sensors={sensors}
+          onDragStart={handleDragStart}
+          onDragEnd={handleDragEnd}
+          onDragCancel={() => setActiveId(null)}
+        >
+          <div className="grid items-start gap-4 lg:grid-cols-3">
+            <KanbanColumn
+              id="all"
+              title="Kaikki"
+              count={String(byColumn.all.length)}
+              className="order-3 lg:order-1"
+              onAdd={() => setAdding(adding === "all" ? null : "all")}
+              addForm={addFormFor("all")}
+            >
+              {renderCards(byColumn.all)}
+            </KanbanColumn>
+            <KanbanColumn
+              id="week"
+              title="Tämä viikko"
+              subtitle={`${shortDateFi(monday)}–${shortDateFi(addDays(monday, 6))}`}
+              count={`${weekPlanned}/${WEEK_ITEM_LIMIT}`}
+              warn={weekPlanned > WEEK_ITEM_LIMIT}
+              className="order-2"
+              onAdd={() => setAdding(adding === "week" ? null : "week")}
+              addForm={addFormFor("week")}
+            >
+              {renderCards(byColumn.week)}
+            </KanbanColumn>
+            <KanbanColumn
+              id="today"
+              title="Tänään"
+              count={String(byColumn.today.length)}
+              className="order-1 lg:order-3"
+              onAdd={() => setAdding(adding === "today" ? null : "today")}
+              addForm={addFormFor("today")}
+            >
+              {renderCards(byColumn.today)}
+            </KanbanColumn>
+          </div>
+          <DragOverlay>
+            {activeItem ? (
+              <ItemCard
+                item={activeItem}
+                board={boardsById.get(activeItem.board_id)}
+                columns={columns}
+                busy={false}
+                badge={badgeFor(activeItem)}
+                onToggle={() => {}}
+                onArchive={() => {}}
+                dragging
+              />
+            ) : null}
+          </DragOverlay>
+        </DndContext>
       </main>
 
-      {dialog && (
-        <BlockDialog
-          key={dialog.key}
-          initial={dialog.draft}
-          boards={boards}
+      {openItem && (
+        <ItemPanel
+          key={openItem.id}
+          item={openItem}
+          board={boardsById.get(openItem.board_id)}
           columns={columns}
-          saving={saving}
-          onClose={() => setDialog(null)}
-          onSave={saveBlock}
-          onDelete={deleteBlock}
+          groups={groups}
+          today={today}
+          onPatch={(patch, label) => void updateItem(openItem, patch, label)}
+          onArchive={(archived) => archiveItem(openItem, archived)}
+          onDelete={() => void deleteItem(openItem)}
+          onClose={closePanel}
         />
       )}
 
       {toast && (
-        <div className="fixed bottom-5 left-1/2 z-80 flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-3 rounded-xl bg-[#29283a] px-4 py-3 text-sm text-white shadow-xl">
-          <span className="min-w-0 flex-1">{toast}</span>
-          <button onClick={() => setToast(null)} aria-label="Sulje" className="text-white/60 hover:text-white">
+        <div
+          role="status"
+          className="fixed bottom-5 left-1/2 z-80 flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-3 rounded-xl bg-[#29283a] px-4 py-3 text-sm text-white shadow-xl"
+        >
+          <span className="min-w-0 flex-1 truncate">{toast.message}</span>
+          {toast.undoable && (
+            <button
+              onClick={() => void undoLast()}
+              className="shrink-0 rounded-md px-2 py-0.5 font-semibold text-[#b9b4ff] hover:bg-white/10"
+            >
+              Kumoa <kbd className="ml-1 text-[11px] text-white/50">⌘Z</kbd>
+            </button>
+          )}
+          <button
+            onClick={() => setToast(null)}
+            aria-label="Sulje"
+            className="shrink-0 text-white/60 hover:text-white"
+          >
             <X size={15} />
           </button>
         </div>
@@ -601,56 +617,14 @@ export function FrontPage({ data }: { data: FrontPageData }) {
   );
 }
 
-/** "2 × 3 h" when all blocks are the same length, otherwise "3 kpl · 7 h". */
-function formatBlockHours(blocks: TimeBlock[]) {
-  if (blocks.length === 0) return "—";
-  const hours = blocks.map(blockHours);
-  if (hours.every((h) => h === hours[0])) return `${blocks.length} × ${formatHours(hours[0])}`;
-  return `${blocks.length} kpl · ${formatHours(hours.reduce((a, b) => a + b, 0))}`;
-}
-
-function SectionTitle({ children, inline }: { children: React.ReactNode; inline?: boolean }) {
-  return (
-    <h2
-      className={`text-xs font-bold uppercase tracking-[0.12em] text-[#8b8998] ${inline ? "" : "mb-3"}`}
-    >
-      {children}
-    </h2>
-  );
-}
-
-function Card({
-  title,
-  aside,
-  warn,
-  className = "",
-  children,
-}: {
-  title?: string;
-  aside?: string;
-  warn?: boolean;
-  className?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <section
-      className={`min-w-0 rounded-2xl border border-[#e5e5ec] bg-white p-4 shadow-[0_1px_2px_rgba(20,20,50,0.04)] md:p-5 ${className}`}
-    >
-      {title && (
-        <div className="mb-3 flex items-center gap-2">
-          <h3 className="text-sm font-bold">{title}</h3>
-          {aside && (
-            <span
-              className={`rounded-md px-1.5 py-0.5 text-[11px] font-semibold ${
-                warn ? "bg-[#fff4e5] text-[#a35f00]" : "bg-[#f2f2f7] text-[#6e6c7d]"
-              }`}
-            >
-              {aside}
-            </span>
-          )}
-        </div>
-      )}
-      {children}
-    </section>
-  );
+/** Distinct option labels of every column with `role`, in first-seen order. */
+function optionLabels(columns: FrontPageData["columns"], role: "status" | "severity") {
+  const labels: string[] = [];
+  for (const column of columns) {
+    if (column.settings?.role !== role) continue;
+    for (const option of column.settings.options ?? []) {
+      if (!labels.includes(option.label)) labels.push(option.label);
+    }
+  }
+  return labels;
 }

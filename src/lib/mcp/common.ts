@@ -4,7 +4,6 @@ import { throwDb } from "@/lib/mcp/result";
 import {
   columnWithRole,
   dueDate,
-  helsinkiToUtc,
   isDone,
   statusOption,
   type ColumnRole,
@@ -204,11 +203,12 @@ export type ItemRow = {
   planned_week: string | null;
   planned_day: string | null;
   completed_at: string | null;
+  archived_at?: string | null;
   updated_at?: string;
 };
 
 export const ITEM_FIELDS =
-  "id, board_id, group_id, title, description, column_values, planned_week, planned_day, completed_at, position, created_at, updated_at";
+  "id, board_id, group_id, title, description, column_values, planned_week, planned_day, completed_at, archived_at, position, created_at, updated_at";
 
 /** Compact, readable view of an item with status / severity / due date resolved. */
 export function describeItem(item: ItemRow, ctx: PlanningContext) {
@@ -232,26 +232,7 @@ export function describeItem(item: ItemRow, ctx: PlanningContext) {
     planned_week: item.planned_week,
     planned_day: item.planned_day,
     completed_at: item.completed_at,
+    archived_at: item.archived_at ?? null,
     updated_at: item.updated_at,
   };
 }
-
-// ---------------------------------------------------------------------------
-// Timestamps
-// ---------------------------------------------------------------------------
-
-const LOCAL_TIME = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})(?::\d{2})?$/;
-
-/** Accepts an ISO timestamp with offset, or a naive "YYYY-MM-DDTHH:MM" read as Helsinki wall-clock time. */
-export function parseTimestamp(value: string, field: string): string {
-  const local = LOCAL_TIME.exec(value.trim());
-  if (local) return helsinkiToUtc(local[1], local[2]).toISOString();
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) throw new Error(`${field} is not a valid timestamp: ${value}`);
-  return date.toISOString();
-}
-
-export const timestampInput = z
-  .string()
-  .min(10)
-  .describe('ISO timestamp with offset, or "YYYY-MM-DDTHH:MM" in Helsinki local time');

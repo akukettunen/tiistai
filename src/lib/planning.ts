@@ -47,24 +47,6 @@ export type PlanningItem = {
   completed_at: string | null;
 };
 
-export type TimeBlockKind = "focus" | "free_coding" | "admin" | "other";
-
-export type TimeBlock = {
-  id: string;
-  owner_id: string;
-  title: string;
-  kind: TimeBlockKind;
-  starts_at: string;
-  ends_at: string;
-  board_id: string | null;
-  item_id: string | null;
-  note_before: string;
-  note_after: string;
-  done_at: string | null;
-  created_at: string;
-  updated_at: string;
-};
-
 // ---------------------------------------------------------------------------
 // Columns and status
 // ---------------------------------------------------------------------------
@@ -82,6 +64,18 @@ export function statusOption(
   columns: PlanningColumn[],
 ): LabelOption | undefined {
   const column = columnWithRole(columns, item.board_id, "status");
+  if (!column) return undefined;
+  const value = item.column_values?.[column.id];
+  return column.settings.options?.find((o) => o.id === value);
+}
+
+/** The selected option of the board's column with `role` (status / severity). */
+export function roleOption(
+  item: Pick<PlanningItem, "board_id" | "column_values">,
+  columns: PlanningColumn[],
+  role: "status" | "severity",
+): LabelOption | undefined {
+  const column = columnWithRole(columns, item.board_id, role);
   if (!column) return undefined;
   const value = item.column_values?.[column.id];
   return column.settings.options?.find((o) => o.id === value);
@@ -219,6 +213,3 @@ export function weekRangeUtc(monday: string): { start: string; end: string } {
   };
 }
 
-export function blockHours(block: Pick<TimeBlock, "starts_at" | "ends_at">): number {
-  return (new Date(block.ends_at).getTime() - new Date(block.starts_at).getTime()) / 3600000;
-}
